@@ -469,6 +469,36 @@ def test_context_manager_builds_envelope_with_stable_key(tmp_path, monkeypatch):
     assert first.full_context_key == second.full_context_key
 
 
+def test_context_manager_build_isolates_nested_recent_messages(tmp_path, monkeypatch):
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent.resolve()))
+    options = WorkspaceContextOptions(
+        include_project_docs=False,
+        include_git_status=False,
+        include_recent_commits=False,
+        include_file_tree=False,
+    )
+    manager = ContextManager(tmp_path, options, recent_message_tokens=100)
+    prior_messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call-1", "content": "result"},
+    ]
+
+    envelope = manager.build("do the task", prior_messages, [])
+    prior_messages[0]["tool_calls"][0]["function"]["arguments"] = '{"changed": true}'
+
+    assert envelope.recent_messages[0]["tool_calls"][0]["function"]["arguments"] == "{}"
+
+
 def test_context_manager_full_context_key_changes_when_required_inputs_change(
     tmp_path, monkeypatch
 ):
@@ -511,3 +541,22 @@ def test_context_manager_full_context_key_changes_when_required_inputs_change(
     readme.write_text("changed project", encoding="utf-8")
 
     assert manager.build(task, prior_messages, tool_schemas).full_context_key != baseline
+
+
+def test_context_manager_full_context_key_changes_when_mode_changes(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent.resolve()))
+    options = WorkspaceContextOptions(
+        include_project_docs=False,
+        include_git_status=False,
+        include_recent_commits=False,
+        include_file_tree=False,
+    )
+    manager = ContextManager(tmp_path, options, recent_message_tokens=100)
+    prior_messages = [{"role": "user", "content": "original message"}]
+
+    run_key = manager.build("do the task", prior_messages, [], mode="run").full_context_key
+    chat_key = manager.build("do the task", prior_messages, [], mode="chat").full_context_key
+
+    assert run_key != chat_key

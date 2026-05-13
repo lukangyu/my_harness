@@ -5,6 +5,7 @@ import html
 import json
 import os
 import subprocess
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -270,7 +271,7 @@ class MessageBudget:
         return groups
 
     def _prepare_message(self, message: dict[str, Any]) -> dict[str, Any]:
-        prepared = dict(message)
+        prepared = deepcopy(message)
         content = prepared.get("content")
         if (
             prepared.get("role") == "tool"
@@ -318,6 +319,7 @@ class ContextManager:
         task: str,
         prior_messages: list[dict[str, Any]],
         tool_schemas: list[dict[str, Any]],
+        mode: str = "run",
     ) -> ContextEnvelope:
         stable_prefix = self.stable_prefix_manager.get_or_build(tool_schemas)
         workspace_context = WorkspaceContext.build(self.cwd, self.options)
@@ -330,6 +332,7 @@ class ContextManager:
                 "workspace_fingerprint": workspace_prefix.workspace_fingerprint,
                 "recent_hash": _hash_json(recent_messages),
                 "task_hash": _hash_text(current_task),
+                "mode": mode,
             }
         )
         return ContextEnvelope(
