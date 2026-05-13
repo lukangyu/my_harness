@@ -68,11 +68,15 @@ def _validate_session_record(record: Any, index: int) -> dict[str, Any]:
         raise ValueError(f"Session record {index} contains generated prompt block")
 
     normalized = dict(record)
+    validated_tool_calls = None
     if role == "assistant" and "tool_calls" in record:
         tool_calls = record["tool_calls"]
         if not isinstance(tool_calls, list):
             raise ValueError(f"Session record {index} tool_calls must be a list")
-        normalized["tool_calls"] = [_validate_tool_call(tool_call, index) for tool_call in tool_calls]
+        validated_tool_calls = [_validate_tool_call(tool_call, index) for tool_call in tool_calls]
+        normalized["tool_calls"] = validated_tool_calls
+    if role == "assistant" and content is None and not validated_tool_calls:
+        raise ValueError(f"Session record {index} content null requires non-empty tool_calls")
     return normalized
 
 
@@ -86,4 +90,13 @@ def _validate_tool_call(tool_call: Any, index: int) -> dict[str, Any]:
         raise ValueError(f"Session record {index} tool_calls entries must be dicts")
     if not isinstance(tool_call.get("id"), str):
         raise ValueError(f"Session record {index} tool_calls entries must include string id")
+    if tool_call.get("type") != "function":
+        raise ValueError(f"Session record {index} tool_calls entries must have function type")
+    function = tool_call.get("function")
+    if not isinstance(function, dict):
+        raise ValueError(f"Session record {index} tool_calls entries must include function dict")
+    if not isinstance(function.get("name"), str) or not function["name"]:
+        raise ValueError(f"Session record {index} tool_calls entries must include non-empty function name")
+    if not isinstance(function.get("arguments"), str):
+        raise ValueError(f"Session record {index} tool_calls entries must include string function arguments")
     return dict(tool_call)

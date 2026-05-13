@@ -442,6 +442,55 @@ def test_session_store_load_rejects_user_content_none(tmp_path):
         raise AssertionError("expected ValueError")
 
 
+def test_session_store_load_rejects_assistant_content_none_without_tool_calls(tmp_path):
+    for records in [
+        [{"role": "assistant", "content": None}],
+        [{"role": "assistant", "content": None, "tool_calls": []}],
+    ]:
+        path = tmp_path / "session.json"
+        path.write_text(json.dumps(records), encoding="utf-8")
+
+        try:
+            SessionStore.load(path)
+        except ValueError as exc:
+            assert "tool_calls" in str(exc).lower()
+        else:
+            raise AssertionError("expected ValueError")
+
+
+def test_session_store_load_rejects_malformed_assistant_tool_calls(tmp_path):
+    malformed_tool_calls = [
+        {"id": "call_a", "type": "file_search", "function": {"name": "list_files", "arguments": "{}"}},
+        {"id": "call_a", "type": "function"},
+        {"id": "call_a", "type": "function", "function": {"arguments": "{}"}},
+        {"id": "call_a", "type": "function", "function": {"name": "", "arguments": "{}"}},
+        {"id": "call_a", "type": "function", "function": {"name": "list_files"}},
+        {"id": "call_a", "type": "function", "function": {"name": "list_files", "arguments": {}}},
+    ]
+
+    for tool_call_payload in malformed_tool_calls:
+        path = tmp_path / "session.json"
+        path.write_text(
+            json.dumps(
+                [
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [tool_call_payload],
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        try:
+            SessionStore.load(path)
+        except ValueError as exc:
+            assert "tool_calls" in str(exc).lower()
+        else:
+            raise AssertionError("expected ValueError")
+
+
 def test_session_store_load_accepts_assistant_tool_calls_and_tool_response(tmp_path):
     records = [
         {
