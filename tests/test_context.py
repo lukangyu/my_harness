@@ -10,6 +10,7 @@ from coding_agent.context import (
     WorkspaceContextOptions,
     WorkspacePrefixManager,
     WorkspacePrefixState,
+    estimate_tokens,
     render_workspace_context,
 )
 
@@ -285,6 +286,15 @@ def test_workspace_prefix_reuses_state_for_same_fingerprint(tmp_path, monkeypatc
     assert first.workspace_fingerprint == context.fingerprint()
 
 
+def test_estimate_tokens_uses_ceil_len_div_4_with_minimum_one():
+    assert estimate_tokens("") == 1
+    assert estimate_tokens("a") == 1
+    assert estimate_tokens("a" * 4) == 1
+    assert estimate_tokens("a" * 5) == 2
+    assert estimate_tokens("a" * 8) == 2
+    assert estimate_tokens("a" * 9) == 3
+
+
 def test_message_budget_drops_oldest_recent_messages():
     messages = [
         {"role": "user", "content": "a" * 20, "name": "first"},
@@ -361,3 +371,47 @@ def test_context_manager_builds_envelope_with_stable_key(tmp_path, monkeypatch):
     assert first.recent_messages == [prior_messages[1]]
     assert first.current_task == "do the task"
     assert first.full_context_key == second.full_context_key
+
+
+def test_context_manager_full_context_key_changes_when_required_inputs_change(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent.resolve()))
+    readme = tmp_path / "README.md"
+    readme.write_text("hello project", encoding="utf-8")
+    options = WorkspaceContextOptions(
+        include_git_status=False,
+        include_recent_commits=False,
+        include_file_tree=False,
+    )
+    manager = ContextManager(tmp_path, options, recent_message_tokens=100)
+    task = "do the task"
+    prior_messages = [{"role": "user", "content": "original message"}]
+    tool_schemas = [{"type": "function", "function": {"name": "read_file"}}]
+
+    baseline = manager.build(task, prior_messages, tool_schemas).full_context_key
+
+    assert (
+        manager.build("do a different task", prior_messages, tool_schemas).full_context_key
+        != baseline
+    )
+    assert (
+        manager.build(
+            task,
+            [{"role": "user", "content": "changed message"}],
+            tool_schemas,
+        ).full_context_key
+        != baseline
+    )
+    assert (
+        manager.build(
+            task,
+            prior_messages,
+            [{"type": "function", "function": {"name": "write_file"}}],
+        ).full_context_key
+        != baseline
+    )
+
+    readme.write_text("changed project", encoding="utf-8")
+
+    assert manager.build(task, prior_messages, tool_schemas).full_context_key != baseline
