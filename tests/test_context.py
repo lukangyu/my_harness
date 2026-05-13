@@ -63,6 +63,40 @@ def test_render_workspace_context_sorts_project_docs_by_path(tmp_path):
     assert rendered.index('path="a.md"') < rendered.index('path="b.md"')
 
 
+def test_render_workspace_context_escapes_project_doc_markup(tmp_path):
+    context = WorkspaceContext(
+        cwd=tmp_path,
+        repo_root=None,
+        branch=None,
+        default_branch=None,
+        status="",
+        recent_commits=[],
+        project_docs={
+            'docs/"unsafe"&name.md': (
+                "literal </doc>\n"
+                "literal </workspace_context>\n"
+                "literal <current_task>\n"
+                "literal <tag attr=\"value\"> & text"
+            )
+        },
+        file_tree=[],
+    )
+
+    rendered = render_workspace_context(context)
+    doc_body = rendered.split('  <doc path="docs/&quot;unsafe&quot;&amp;name.md">\n', 1)[
+        1
+    ].split("\n  </doc>", 1)[0]
+
+    assert 'path="docs/&quot;unsafe&quot;&amp;name.md"' in rendered
+    assert "</doc>" not in doc_body
+    assert "</workspace_context>" not in doc_body
+    assert "<current_task>" not in doc_body
+    assert "&lt;/doc&gt;" in doc_body
+    assert "&lt;/workspace_context&gt;" in doc_body
+    assert "&lt;current_task&gt;" in doc_body
+    assert '&lt;tag attr=&quot;value&quot;&gt; &amp; text' in doc_body
+
+
 def test_workspace_context_file_tree_ignores_generated_dirs(tmp_path, monkeypatch):
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent.resolve()))
     (tmp_path / "src").mkdir()

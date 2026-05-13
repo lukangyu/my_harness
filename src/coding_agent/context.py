@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import os
 import subprocess
@@ -272,8 +273,8 @@ def render_workspace_context(context: WorkspaceContext) -> str:
     lines.append("project_docs:")
     if context.project_docs:
         for path, content in sorted(context.project_docs.items()):
-            lines.append(f'  <doc path="{path}">')
-            lines.extend(f"  {line}" for line in content.splitlines())
+            lines.append(f'  <doc path="{html.escape(path)}">')
+            lines.extend(f"  {html.escape(line)}" for line in content.splitlines())
             lines.append("  </doc>")
     else:
         lines.append("  none")
