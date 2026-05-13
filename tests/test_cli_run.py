@@ -146,3 +146,18 @@ def test_chat_invalid_resume_exits_with_error(tmp_path):
 
     assert result.exit_code == 1
     assert "Error:" in result.output
+
+
+def test_chat_resume_and_resume_latest_conflict_exits_with_error(tmp_path):
+    runner = CliRunner()
+    session_path = tmp_path / "session.json"
+    session_path.write_text('[{"role": "user", "content": "earlier"}]', encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        ["chat", "--resume", str(session_path), "--resume-latest"],
+        input="/status\n",
+    )
+
+    assert result.exit_code == 1
+    assert "--resume and --resume-latest cannot be used together" in result.output

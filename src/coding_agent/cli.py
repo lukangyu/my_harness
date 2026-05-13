@@ -86,6 +86,8 @@ def chat(
 
 
 def _load_chat_messages(resume: Optional[Path], resume_latest: bool) -> list[dict[str, Any]]:
+    if resume is not None and resume_latest:
+        raise ValueError("--resume and --resume-latest cannot be used together")
     if resume is not None:
         return SessionStore.load(resume)
     if resume_latest:

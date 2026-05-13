@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 import httpx
@@ -375,13 +376,65 @@ def test_session_store_load_rejects_non_list_json(tmp_path):
         raise AssertionError("expected ValueError")
 
 
-def test_session_store_latest_and_load_latest_use_newest_session_name(tmp_path):
+def test_session_store_load_rejects_non_dict_item(tmp_path):
+    path = tmp_path / "session.json"
+    path.write_text(json.dumps([{"role": "user", "content": "hello"}, "bad"]), encoding="utf-8")
+
+    try:
+        SessionStore.load(path)
+    except ValueError as exc:
+        assert "dict" in str(exc).lower()
+    else:
+        raise AssertionError("expected ValueError")
+
+
+def test_session_store_load_rejects_system_and_generated_prompt_blocks(tmp_path):
+    for records in [
+        [{"role": "system", "content": "do not restore"}],
+        [{"role": "user", "content": "<workspace_context>\nsecret\n</workspace_context>"}],
+        [{"role": "assistant", "content": "<coding_agent_prefix version='1'>"}],
+        [{"role": "user", "content": "<current_task>\nold task\n</current_task>"}],
+    ]:
+        path = tmp_path / "session.json"
+        path.write_text(json.dumps(records), encoding="utf-8")
+
+        try:
+            SessionStore.load(path)
+        except ValueError as exc:
+            assert "session" in str(exc).lower()
+        else:
+            raise AssertionError("expected ValueError")
+
+
+def test_session_store_load_accepts_assistant_tool_calls_and_tool_response(tmp_path):
+    records = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [tool_call("list_files", "{}", call_id="call_a")],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_a",
+            "name": "list_files",
+            "content": json.dumps({"ok": True}),
+        },
+    ]
+    path = tmp_path / "session.json"
+    path.write_text(json.dumps(records), encoding="utf-8")
+
+    assert SessionStore.load(path) == records
+
+
+def test_session_store_latest_and_load_latest_use_newest_session_mtime(tmp_path):
     store = SessionStore(tmp_path)
     store.sessions_dir.mkdir(parents=True)
-    older = store.sessions_dir / "20260513-120000-000001.json"
-    newer = store.sessions_dir / "20260513-120000-000002.json"
+    older = store.sessions_dir / "20260513-120000-999999.json"
+    newer = store.sessions_dir / "20260513-120000-000001.json"
     older.write_text(json.dumps([{"role": "user", "content": "older"}]), encoding="utf-8")
     newer.write_text(json.dumps([{"role": "user", "content": "newer"}]), encoding="utf-8")
+    os.utime(older, ns=(1_000_000_000, 1_000_000_000))
+    os.utime(newer, ns=(2_000_000_000, 2_000_000_000))
 
     assert store.latest() == newer
     assert store.load_latest() == [{"role": "user", "content": "newer"}]
