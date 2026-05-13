@@ -121,4 +121,18 @@ deny = [
   "git checkout",
   "powershell Remove-Item"
 ]
+
+[context]
+max_input_tokens = 24000
+reserved_output_tokens = 4000
+recent_message_tokens = 12000
+project_context_tokens = 4000
+doc_max_chars = 1200
+tree_max_entries = 200
+include_project_docs = true
+include_file_tree = true
+include_git_status = true
+include_recent_commits = true
+restore_last_session = false
+show_cache_stats = true
 """
