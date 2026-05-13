@@ -68,7 +68,7 @@ def chat() -> None:
             result, session_path = _run_task(command, messages)
         except (ConfigError, LLMError) as exc:
             console.print(f"[red]Error:[/] {exc}")
-            raise typer.Exit(1) from exc
+            continue
 
         messages[:] = result.messages
         console.print(result.final_answer)
