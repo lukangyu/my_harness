@@ -130,6 +130,17 @@ def test_agent_continues_prior_messages_without_system_prompt(tmp_path):
     ]
 
 
+def test_agent_adds_system_prompt_for_empty_prior_messages(tmp_path):
+    client = FakeClient([{"message": {"role": "assistant", "content": "answer"}}])
+    agent = AgentLoop(client, make_tools(tmp_path), max_steps=1)
+
+    result = agent.run("new task", prior_messages=[])
+
+    assert result.final_answer == "answer"
+    assert client.calls[0]["messages"][0]["role"] == "system"
+    assert client.calls[0]["messages"][1] == {"role": "user", "content": "new task"}
+
+
 def test_llm_client_posts_openai_compatible_chat_request(monkeypatch):
     requests = []
 

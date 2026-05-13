@@ -34,7 +34,7 @@ class AgentLoop:
         prior_messages: list[dict[str, Any]] | None = None,
     ) -> AgentResult:
         messages = list(prior_messages or [])
-        if prior_messages is None:
+        if not messages:
             messages.append({"role": "system", "content": SYSTEM_PROMPT})
         messages.append({"role": "user", "content": task})
 
