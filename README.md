@@ -15,12 +15,16 @@ easy to inspect.
 - Project-local configuration in `.coding-agent/config.toml`.
 - One-shot task mode with `coding-agent run "..."`.
 - Interactive REPL mode with `coding-agent chat`.
+- Chat resume from a saved session with `coding-agent chat --resume PATH` or
+  `coding-agent chat --resume-latest`.
 - OpenAI-compatible model calls through `/chat/completions`.
 - Tool calls for listing files, reading UTF-8 files, writing UTF-8 files,
   searching text, and running allowed commands.
 - Workspace sandboxing for all file tool paths.
 - Configurable allow and deny lists for shell commands.
-- Session logs written to `.coding-agent/sessions/`.
+- Context management with a stable prompt prefix, workspace baseline, and
+  budgeted recent conversation history.
+- Sanitized session logs written to `.coding-agent/sessions/`.
 
 ## Project structure
 
@@ -29,10 +33,11 @@ src/coding_agent/
   agent.py      Main agent loop and tool-call handling.
   cli.py        Typer commands: init, run, and chat.
   config.py     TOML config loading, validation, and environment lookup.
+  context.py    Prompt prefixes, workspace context, message budgeting, usage stats.
   llm.py        OpenAI-compatible chat completions client.
   policy.py     Shell command allow/deny policy.
   sandbox.py    Workspace path resolution and boundary checks.
-  session.py    JSON session log writer.
+  session.py    JSON session log writer and resume loader.
   shell.py      Policy-gated subprocess execution.
   tools.py      Tool registry and built-in tool implementations.
 
@@ -46,14 +51,39 @@ docs/plans/     Design notes and implementation plans.
    `.coding-agent/config.toml` from the current working directory.
 2. The CLI builds a `WorkspaceSandbox`, `CommandPolicy`, `ShellRunner`,
    `ToolRegistry`, model client, and `AgentLoop`.
-3. The agent sends the conversation and tool schemas to the configured
+3. The context manager builds each request from a stable system prefix, a
+   workspace context block, budgeted recent messages, and the current task.
+4. The agent sends that prompt and the tool schemas to the configured
    OpenAI-compatible endpoint.
-4. If the model returns tool calls, the agent validates and dispatches them
+5. If the model returns tool calls, the agent validates and dispatches them
    through the local tool registry.
-5. Tool results are appended to the conversation as tool messages.
-6. The loop continues until the model returns a final answer or `max_steps` is
+6. Tool results are appended to the reusable conversation history as tool
+   messages.
+7. The loop continues until the model returns a final answer or `max_steps` is
    reached.
-7. The full message history is saved as JSON under `.coding-agent/sessions/`.
+8. Sanitized conversation history is saved as JSON under
+   `.coding-agent/sessions/`. Generated prompt blocks such as workspace context
+   and current task wrappers are not saved.
+
+## Context management
+
+Each model request is assembled in this order:
+
+1. Stable system prefix: behavior, safety, tool, and response rules. This block
+   has a local `prompt_cache_key` and stays byte-stable while the prompt version
+   and tool schemas do not change.
+2. Workspace context: current directory, repository root, branch, default
+   branch, git status, recent commits, a clipped file tree, and clipped project
+   docs such as `AGENTS.md`, `README.md`, `pyproject.toml`, and `package.json`.
+   This block has a fingerprint so it can be reused until workspace inputs
+   change.
+3. Dynamic context: recent saved conversation messages and the current task.
+   The full context key also includes the run mode (`run` or `chat`).
+
+Recent conversation history is trimmed with an approximate token budget. Oldest
+messages are dropped first, assistant tool-call groups stay together with their
+tool results, and oversized tool-result content is truncated while preserving
+tool metadata.
 
 ## Configuration
 
@@ -91,6 +121,20 @@ deny = [
   "git checkout",
   "powershell Remove-Item"
 ]
+
+[context]
+max_input_tokens = 24000
+reserved_output_tokens = 4000
+recent_message_tokens = 12000
+project_context_tokens = 4000
+doc_max_chars = 1200
+tree_max_entries = 200
+include_project_docs = true
+include_file_tree = true
+include_git_status = true
+include_recent_commits = true
+restore_last_session = false
+show_cache_stats = true
 ```
 
 Meaning:
@@ -107,6 +151,30 @@ Meaning:
 - `commands.allow`: Exact command or command-prefix rules that may run.
 - `commands.deny`: Exact command or command-prefix rules that are blocked before
   allow rules are considered.
+- `context.max_input_tokens`: Reserved for total input budgeting. Current
+  trimming is controlled by `context.recent_message_tokens`.
+- `context.reserved_output_tokens`: Reserved output budget for future total
+  context calculations.
+- `context.recent_message_tokens`: Approximate-token budget for reusable recent
+  conversation messages.
+- `context.project_context_tokens`: Reserved for workspace/project context
+  budgeting.
+- `context.doc_max_chars`: Maximum characters read from each whitelisted project
+  document.
+- `context.tree_max_entries`: Maximum file paths included in the workspace file
+  tree.
+- `context.include_project_docs`: Include clipped high-value project docs in the
+  workspace context.
+- `context.include_file_tree`: Include a clipped file tree in the workspace
+  context.
+- `context.include_git_status`: Include `git status --short` output when inside
+  a git repository.
+- `context.include_recent_commits`: Include up to five recent commits when
+  inside a git repository.
+- `context.restore_last_session`: Reserved flag. Use `chat --resume-latest` to
+  resume explicitly.
+- `context.show_cache_stats`: Print cache hit percentage when the model response
+  includes both input token count and cached input token count.
 
 Set the configured API key before running the agent:
 
@@ -151,6 +219,8 @@ is cleared or the process exits.
 
 ```bash
 coding-agent chat
+coding-agent chat --resume .coding-agent/sessions/20260513-120000-000000.json
+coding-agent chat --resume-latest
 ```
 
 Slash commands:
@@ -158,6 +228,27 @@ Slash commands:
 - `/exit`: Quit chat mode.
 - `/clear`: Clear the current conversation history.
 - `/status`: Print the number of messages currently in memory.
+
+`--resume PATH` loads validated conversation messages from a specific saved
+session. `--resume-latest` loads the newest JSON session under
+`.coding-agent/sessions/` for the current working directory. Resume options
+restore sanitized conversation history only; generated prompt blocks are
+recreated for the current workspace on each request.
+
+## Usage and cache stats
+
+The OpenAI-compatible client records usage metadata when the provider returns
+it. The CLI prints a line such as:
+
+```text
+Cache: 85% cached input tokens
+```
+
+This display depends on `context.show_cache_stats = true` and a response usage
+payload that includes both input tokens and cached input tokens. Supported fields
+include OpenAI-style `prompt_tokens` with
+`prompt_tokens_details.cached_tokens`, and compatible `input_tokens` plus
+`cached_tokens`. If those fields are absent, no cache line is printed.
 
 ## Safety model
 
@@ -229,10 +320,12 @@ git diff -- README.md
 
 - `apply_patch` is registered as a tool name but is explicitly unsupported in
   the MVP and always returns an error.
-- The system prompt is minimal and does not yet provide detailed coding-agent
-  behavior guidance.
 - Streaming is configured but not implemented by the model client.
-- There is no context compaction or long-term memory.
+- There is no automatic summary compression, long-term memory, or fact
+  extraction.
+- Context budgeting uses an approximate token estimate, not a model tokenizer.
+- The workspace context is a clipped orientation aid, not a full repository
+  index or semantic retrieval system.
 - There is no multi-agent execution.
 - There is no full-screen TUI.
 - The CLI only loads `.coding-agent/config.toml` from the current working
