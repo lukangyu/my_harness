@@ -160,6 +160,9 @@ def _project_docs(
 
 
 def _file_tree(root: Path, options: WorkspaceContextOptions) -> list[str]:
+    if options.tree_max_entries <= 0:
+        return []
+
     files: list[str] = []
     for dirpath, dirnames, filenames in os.walk(root):
         current = Path(dirpath)

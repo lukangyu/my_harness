@@ -45,8 +45,23 @@ def test_workspace_context_file_tree_ignores_generated_dirs(tmp_path, monkeypatc
     assert ".pytest_cache/README.md" not in context.file_tree
 
 
+def test_workspace_context_file_tree_zero_entries_returns_empty(tmp_path, monkeypatch):
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent.resolve()))
+    (tmp_path / "README.md").write_text("hello", encoding="utf-8")
+
+    context = WorkspaceContext.build(tmp_path, WorkspaceContextOptions(tree_max_entries=0))
+
+    assert context.file_tree == []
+
+
 def test_workspace_context_collects_git_state(tmp_path):
-    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "init", "--initial-branch=main"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
     (tmp_path / "README.md").write_text("hello", encoding="utf-8")
@@ -63,7 +78,7 @@ def test_workspace_context_collects_git_state(tmp_path):
     context = WorkspaceContext.build(tmp_path, WorkspaceContextOptions())
 
     assert context.repo_root == tmp_path.resolve()
-    assert context.branch in {"main", "master"}
+    assert context.branch == "main"
     assert "?? dirty.txt" in context.status
     assert any("initial" in commit for commit in context.recent_commits)
 
