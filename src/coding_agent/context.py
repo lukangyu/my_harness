@@ -271,7 +271,7 @@ def render_workspace_context(context: WorkspaceContext) -> str:
     lines.append("")
     lines.append("project_docs:")
     if context.project_docs:
-        for path, content in context.project_docs.items():
+        for path, content in sorted(context.project_docs.items()):
             lines.append(f'  <doc path="{path}">')
             lines.extend(f"  {line}" for line in content.splitlines())
             lines.append("  </doc>")

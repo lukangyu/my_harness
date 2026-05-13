@@ -8,6 +8,7 @@ from coding_agent.context import (
     WorkspaceContextOptions,
     WorkspacePrefixManager,
     WorkspacePrefixState,
+    render_workspace_context,
 )
 
 
@@ -32,6 +33,34 @@ def test_workspace_context_clips_project_docs(tmp_path, monkeypatch):
     context = WorkspaceContext.build(tmp_path, WorkspaceContextOptions(doc_max_chars=5))
 
     assert context.project_docs["README.md"] == "xxxxx\n... [truncated]"
+
+
+def test_render_workspace_context_sorts_project_docs_by_path(tmp_path):
+    first = WorkspaceContext(
+        cwd=tmp_path,
+        repo_root=None,
+        branch=None,
+        default_branch=None,
+        status="",
+        recent_commits=[],
+        project_docs={"b.md": "bravo", "a.md": "alpha"},
+        file_tree=[],
+    )
+    second = WorkspaceContext(
+        cwd=tmp_path,
+        repo_root=None,
+        branch=None,
+        default_branch=None,
+        status="",
+        recent_commits=[],
+        project_docs={"a.md": "alpha", "b.md": "bravo"},
+        file_tree=[],
+    )
+
+    rendered = render_workspace_context(first)
+
+    assert rendered == render_workspace_context(second)
+    assert rendered.index('path="a.md"') < rendered.index('path="b.md"')
 
 
 def test_workspace_context_file_tree_ignores_generated_dirs(tmp_path, monkeypatch):
