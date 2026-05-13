@@ -221,6 +221,8 @@ class MessageBudget:
             prepared = self._prepare_message(message)
             tokens = self._message_tokens(prepared)
             if used_tokens + tokens > self.recent_message_tokens:
+                if selected:
+                    break
                 continue
             selected.append(prepared)
             used_tokens += tokens

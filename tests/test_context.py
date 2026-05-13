@@ -297,6 +297,18 @@ def test_message_budget_drops_oldest_recent_messages():
     assert trimmed == messages[1:]
 
 
+def test_message_budget_stops_when_newer_message_exceeds_budget():
+    messages = [
+        {"role": "user", "content": "old", "name": "old"},
+        {"role": "assistant", "content": "x" * 44, "name": "too-large-newer"},
+        {"role": "user", "content": "new", "name": "newest"},
+    ]
+
+    trimmed = MessageBudget(recent_message_tokens=10).trim_recent_messages(messages)
+
+    assert trimmed == [messages[2]]
+
+
 def test_message_budget_truncates_long_tool_content():
     messages = [
         {
