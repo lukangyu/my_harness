@@ -2,6 +2,8 @@ import subprocess
 
 from coding_agent.context import (
     ContextEnvelope,
+    ContextManager,
+    MessageBudget,
     PromptBuilder,
     StablePrefixManager,
     WorkspaceContext,
@@ -281,3 +283,69 @@ def test_workspace_prefix_reuses_state_for_same_fingerprint(tmp_path, monkeypatc
     assert first is second
     assert first.text == second.text
     assert first.workspace_fingerprint == context.fingerprint()
+
+
+def test_message_budget_drops_oldest_recent_messages():
+    messages = [
+        {"role": "user", "content": "a" * 20, "name": "first"},
+        {"role": "assistant", "content": "b" * 20, "name": "second"},
+        {"role": "user", "content": "c" * 20, "name": "third"},
+    ]
+
+    trimmed = MessageBudget(recent_message_tokens=10).trim_recent_messages(messages)
+
+    assert trimmed == messages[1:]
+
+
+def test_message_budget_truncates_long_tool_content():
+    messages = [
+        {
+            "role": "tool",
+            "tool_call_id": "call-1",
+            "content": "x" * 12,
+            "metadata": {"kept": True},
+        }
+    ]
+
+    trimmed = MessageBudget(
+        recent_message_tokens=100,
+        max_tool_content_chars=5,
+    ).trim_recent_messages(messages)
+
+    assert trimmed == [
+        {
+            "role": "tool",
+            "tool_call_id": "call-1",
+            "content": "xxxxx\n... [truncated by context budget]",
+            "metadata": {"kept": True},
+        }
+    ]
+    assert messages[0]["content"] == "x" * 12
+
+
+def test_context_manager_builds_envelope_with_stable_key(tmp_path, monkeypatch):
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent.resolve()))
+    (tmp_path / "README.md").write_text("hello project", encoding="utf-8")
+    options = WorkspaceContextOptions(
+        include_git_status=False,
+        include_recent_commits=False,
+        include_file_tree=False,
+    )
+    manager = ContextManager(tmp_path, options, recent_message_tokens=5)
+    prior_messages = [
+        {"role": "user", "content": "a" * 20, "name": "drop-me"},
+        {"role": "assistant", "content": "b" * 20, "name": "keep-me"},
+    ]
+    tool_schemas = [{"type": "function", "function": {"name": "read_file"}}]
+
+    first = manager.build("do the task", prior_messages, tool_schemas)
+    second = manager.build("do the task", prior_messages, tool_schemas)
+
+    assert isinstance(first, ContextEnvelope)
+    assert first.stable_prefix.text.startswith("<coding_agent_prefix")
+    assert first.workspace_prefix.text.startswith("<workspace_context>")
+    assert "README.md" in first.workspace_prefix.text
+    assert first.session_summary is None
+    assert first.recent_messages == [prior_messages[1]]
+    assert first.current_task == "do the task"
+    assert first.full_context_key == second.full_context_key

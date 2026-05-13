@@ -195,6 +195,103 @@ class ContextEnvelope:
     full_context_key: str
 
 
+def estimate_tokens(text: str) -> int:
+    return max(1, (len(text) + 3) // 4)
+
+
+class MessageBudget:
+    def __init__(
+        self,
+        recent_message_tokens: int,
+        max_tool_content_chars: int = 4000,
+    ) -> None:
+        self.recent_message_tokens = recent_message_tokens
+        self.max_tool_content_chars = max_tool_content_chars
+
+    def trim_recent_messages(
+        self,
+        messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if self.recent_message_tokens <= 0:
+            return []
+
+        selected: list[dict[str, Any]] = []
+        used_tokens = 0
+        for message in reversed(messages):
+            prepared = self._prepare_message(message)
+            tokens = self._message_tokens(prepared)
+            if used_tokens + tokens > self.recent_message_tokens:
+                continue
+            selected.append(prepared)
+            used_tokens += tokens
+        selected.reverse()
+        return selected
+
+    def _prepare_message(self, message: dict[str, Any]) -> dict[str, Any]:
+        prepared = dict(message)
+        content = prepared.get("content")
+        if (
+            prepared.get("role") == "tool"
+            and isinstance(content, str)
+            and len(content) > self.max_tool_content_chars
+        ):
+            prepared["content"] = (
+                content[: self.max_tool_content_chars]
+                + "\n... [truncated by context budget]"
+            )
+        return prepared
+
+    def _message_tokens(self, message: dict[str, Any]) -> int:
+        content = message.get("content", "")
+        if isinstance(content, str):
+            text = content
+        else:
+            text = json.dumps(content, sort_keys=True, ensure_ascii=False)
+        return estimate_tokens(text)
+
+
+class ContextManager:
+    def __init__(
+        self,
+        cwd: Path,
+        options: WorkspaceContextOptions,
+        recent_message_tokens: int,
+    ) -> None:
+        self.cwd = cwd
+        self.options = options
+        self.stable_prefix_manager = StablePrefixManager()
+        self.workspace_prefix_manager = WorkspacePrefixManager()
+        self.message_budget = MessageBudget(recent_message_tokens)
+
+    def build(
+        self,
+        task: str,
+        prior_messages: list[dict[str, Any]],
+        tool_schemas: list[dict[str, Any]],
+    ) -> ContextEnvelope:
+        stable_prefix = self.stable_prefix_manager.get_or_build(tool_schemas)
+        workspace_context = WorkspaceContext.build(self.cwd, self.options)
+        workspace_prefix = self.workspace_prefix_manager.get_or_build(workspace_context)
+        recent_messages = self.message_budget.trim_recent_messages(prior_messages)
+        current_task = str(task)
+        full_context_key = _hash_json(
+            {
+                "stable_prompt_key": stable_prefix.prompt_cache_key,
+                "workspace_fingerprint": workspace_prefix.workspace_fingerprint,
+                "recent_hash": _hash_json(recent_messages),
+                "task_hash": _hash_text(current_task),
+            }
+        )
+        return ContextEnvelope(
+            stable_prefix=stable_prefix,
+            workspace_prefix=workspace_prefix,
+            session_summary=None,
+            recent_messages=recent_messages,
+            current_task=current_task,
+            full_context_key=full_context_key,
+        )
+
+
 class PromptBuilder:
     def to_messages(self, envelope: ContextEnvelope, mode: str) -> list[dict[str, Any]]:
         messages = [
