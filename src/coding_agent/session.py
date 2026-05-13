@@ -61,7 +61,9 @@ def _validate_session_record(record: Any, index: int) -> dict[str, Any]:
         return dict(record)
 
     content = record.get("content")
-    if content is not None and not isinstance(content, str):
+    if role == "user" and not isinstance(content, str):
+        raise ValueError(f"Session record {index} content must be a string")
+    if role == "assistant" and content is not None and not isinstance(content, str):
         raise ValueError(f"Session record {index} content must be a string or null")
     if isinstance(content, str) and any(marker in content for marker in _GENERATED_PROMPT_MARKERS):
         raise ValueError(f"Session record {index} contains generated prompt block")
