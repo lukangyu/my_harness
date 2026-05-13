@@ -69,9 +69,11 @@ def _contains_shell_control_operator(command: str) -> bool:
             elif quote == char:
                 quote = None
         elif quote is None:
+            if command.startswith("$(", index):
+                return True
             if command.startswith(("&&", "||"), index):
                 return True
-            if char in (";", "&", "|"):
+            if char in (";", "&", "|", ">", "<", "`"):
                 return True
 
         index += 1

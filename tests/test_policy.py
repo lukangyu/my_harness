@@ -86,6 +86,11 @@ def test_rejects_shell_control_operators_before_allow_matching():
         "pytest || python -c pass",
         "pytest | cat",
         "pytest; python -c pass",
+        "pytest > ../outside.txt",
+        "pytest >> ../outside.txt",
+        "pytest < input.txt",
+        "pytest $(python -c pass)",
+        "pytest `python -c pass`",
         "pytest\npython -c pass",
         "pytest\rpython -c pass",
     ]:
