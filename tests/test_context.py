@@ -1,5 +1,7 @@
 import subprocess
 
+import pytest
+
 from coding_agent.context import (
     ContextEnvelope,
     ContextManager,
@@ -222,6 +224,7 @@ def test_prompt_builder_message_order():
     envelope = ContextEnvelope(
         stable_prefix=stable,
         workspace_prefix=workspace,
+        mode="run",
         session_summary=None,
         recent_messages=[{"role": "assistant", "content": "old"}],
         current_task="hello",
@@ -256,6 +259,7 @@ def test_prompt_builder_includes_session_summary_before_recent_messages():
     envelope = ContextEnvelope(
         stable_prefix=stable,
         workspace_prefix=workspace,
+        mode="chat",
         session_summary="summary",
         recent_messages=[{"role": "assistant", "content": "old"}],
         current_task="hello",
@@ -270,6 +274,34 @@ def test_prompt_builder_includes_session_summary_before_recent_messages():
     }
     assert messages[3] == {"role": "assistant", "content": "old"}
     assert "mode: chat" in messages[4]["content"]
+
+
+def test_prompt_builder_rejects_render_mode_mismatch():
+    stable = StablePrefixManager().get_or_build([])
+    workspace = WorkspacePrefixState(
+        text="<workspace_context>ctx</workspace_context>",
+        workspace_fingerprint="w",
+        cwd=".",
+        repo_root=None,
+        branch=None,
+        default_branch=None,
+        status_hash="s",
+        recent_commits_hash="c",
+        project_docs_hash="d",
+        file_tree_hash="f",
+    )
+    envelope = ContextEnvelope(
+        stable_prefix=stable,
+        workspace_prefix=workspace,
+        mode="run",
+        session_summary=None,
+        recent_messages=[],
+        current_task="hello",
+        full_context_key="full",
+    )
+
+    with pytest.raises(ValueError, match="render mode"):
+        PromptBuilder().to_messages(envelope, mode="chat")
 
 
 def test_workspace_prefix_reuses_state_for_same_fingerprint(tmp_path, monkeypatch):
@@ -464,6 +496,7 @@ def test_context_manager_builds_envelope_with_stable_key(tmp_path, monkeypatch):
     assert first.workspace_prefix.text.startswith("<workspace_context>")
     assert "README.md" in first.workspace_prefix.text
     assert first.session_summary is None
+    assert first.mode == "run"
     assert first.recent_messages == [prior_messages[1]]
     assert first.current_task == "do the task"
     assert first.full_context_key == second.full_context_key
@@ -560,3 +593,18 @@ def test_context_manager_full_context_key_changes_when_mode_changes(
     chat_key = manager.build("do the task", prior_messages, [], mode="chat").full_context_key
 
     assert run_key != chat_key
+
+
+def test_context_manager_build_sets_envelope_mode(tmp_path, monkeypatch):
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent.resolve()))
+    options = WorkspaceContextOptions(
+        include_project_docs=False,
+        include_git_status=False,
+        include_recent_commits=False,
+        include_file_tree=False,
+    )
+    manager = ContextManager(tmp_path, options, recent_message_tokens=100)
+
+    envelope = manager.build("do the task", [], [], mode="chat")
+
+    assert envelope.mode == "chat"

@@ -190,6 +190,7 @@ class WorkspacePrefixState:
 class ContextEnvelope:
     stable_prefix: StablePrefixState
     workspace_prefix: WorkspacePrefixState
+    mode: str
     session_summary: str | None
     recent_messages: list[dict[str, Any]]
     current_task: str
@@ -338,6 +339,7 @@ class ContextManager:
         return ContextEnvelope(
             stable_prefix=stable_prefix,
             workspace_prefix=workspace_prefix,
+            mode=mode,
             session_summary=None,
             recent_messages=recent_messages,
             current_task=current_task,
@@ -346,7 +348,16 @@ class ContextManager:
 
 
 class PromptBuilder:
-    def to_messages(self, envelope: ContextEnvelope, mode: str) -> list[dict[str, Any]]:
+    def to_messages(
+        self,
+        envelope: ContextEnvelope,
+        mode: str | None = None,
+    ) -> list[dict[str, Any]]:
+        render_mode = envelope.mode
+        if mode is not None and mode != render_mode:
+            raise ValueError(
+                f"render mode {mode!r} does not match envelope mode {render_mode!r}"
+            )
         messages = [
             {"role": "system", "content": envelope.stable_prefix.text},
             {"role": "user", "content": envelope.workspace_prefix.text},
@@ -368,7 +379,7 @@ class PromptBuilder:
                 "role": "user",
                 "content": (
                     f"<current_task>\n"
-                    f"mode: {mode}\n"
+                    f"mode: {render_mode}\n"
                     f"content:\n{envelope.current_task}\n"
                     f"</current_task>"
                 ),
