@@ -46,6 +46,18 @@ def test_denied_command_is_not_executed(tmp_path):
     assert not marker.exists()
 
 
+def test_bare_allowed_command_does_not_execute_workspace_batch_file(tmp_path):
+    marker = tmp_path / "marker.txt"
+    fake_pytest = tmp_path / "pytest.bat"
+    fake_pytest.write_text("@echo off\necho ran > marker.txt\n", encoding="utf-8")
+    runner = ShellRunner(CommandPolicy(allow=["pytest"], deny=[]), cwd=tmp_path)
+
+    result = runner.run("pytest --version")
+
+    assert not marker.exists()
+    assert result.allowed is True
+
+
 def test_rejects_chained_command_without_executing_second_segment(tmp_path):
     marker = tmp_path / "marker.txt"
     runner = ShellRunner(CommandPolicy(allow=["pytest"], deny=["del marker.txt"]), cwd=tmp_path)
@@ -86,9 +98,9 @@ def test_timeout_decodes_captured_bytes(tmp_path, monkeypatch):
         raise subprocess.TimeoutExpired(cmd="example", timeout=1, output=b"out", stderr=b"err")
 
     monkeypatch.setattr(shell.subprocess, "run", raise_timeout)
-    runner = ShellRunner(CommandPolicy(allow=["example"], deny=[]), cwd=tmp_path, timeout_seconds=1)
+    runner = ShellRunner(CommandPolicy(allow=[sys.executable], deny=[]), cwd=tmp_path, timeout_seconds=1)
 
-    result = runner.run("example")
+    result = runner.run(f"{sys.executable} --version")
 
     assert result.stdout == "out"
     assert result.stderr.startswith("err\n")

@@ -90,7 +90,9 @@ def test_rejects_shell_control_operators_before_allow_matching():
         "pytest >> ../outside.txt",
         "pytest < input.txt",
         "pytest $(python -c pass)",
+        "pytest \"$(python -c pass)\"",
         "pytest `python -c pass`",
+        "pytest \"`python -c pass`\"",
         "pytest\npython -c pass",
         "pytest\rpython -c pass",
     ]:

@@ -63,17 +63,18 @@ def _contains_shell_control_operator(command: str) -> bool:
     while index < len(command):
         char = command[index]
 
+        if command.startswith("$(", index) or char == "`":
+            return True
+
         if char == '"':
             if quote is None:
                 quote = char
             elif quote == char:
                 quote = None
         elif quote is None:
-            if command.startswith("$(", index):
-                return True
             if command.startswith(("&&", "||"), index):
                 return True
-            if char in (";", "&", "|", ">", "<", "`"):
+            if char in (";", "&", "|", ">", "<"):
                 return True
 
         index += 1

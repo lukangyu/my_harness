@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import subprocess
+import os
+import shlex
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -38,13 +41,22 @@ class ShellRunner:
             )
 
         try:
+            argv = _command_to_argv(command, self.cwd)
             completed = subprocess.run(
-                command,
+                argv,
                 cwd=self.cwd,
-                shell=True,
+                shell=False,
                 text=True,
                 capture_output=True,
                 timeout=self.timeout_seconds,
+            )
+        except ValueError as exc:
+            return ShellResult(
+                command=command,
+                allowed=False,
+                exit_code=None,
+                stdout="",
+                stderr=str(exc),
             )
         except subprocess.TimeoutExpired as exc:
             stdout = _to_text(exc.stdout)
@@ -77,4 +89,31 @@ def _to_text(value: str | bytes | None) -> str:
         return ""
     if isinstance(value, bytes):
         return value.decode(errors="replace")
+    return value
+
+
+def _command_to_argv(command: str, cwd: Path) -> list[str]:
+    try:
+        argv = [_strip_outer_quotes(arg) for arg in shlex.split(command, posix=os.name != "nt")]
+    except ValueError as exc:
+        raise ValueError(f"Invalid shell command syntax: {exc}") from exc
+    if not argv:
+        raise ValueError("Command is empty")
+
+    executable = argv[0]
+    resolved = shutil.which(executable, path=os.environ.get("PATH"))
+    if resolved is None:
+        raise ValueError(f"Executable not found on PATH: {executable}")
+
+    resolved_path = Path(resolved).resolve()
+    cwd_path = cwd.resolve()
+    if resolved_path == cwd_path or cwd_path in resolved_path.parents:
+        raise ValueError(f"Refusing to execute workspace-local command: {executable}")
+
+    return [str(resolved_path), *argv[1:]]
+
+
+def _strip_outer_quotes(value: str) -> str:
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
     return value
