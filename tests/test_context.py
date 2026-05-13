@@ -1,6 +1,14 @@
 import subprocess
 
-from coding_agent.context import WorkspaceContext, WorkspaceContextOptions
+from coding_agent.context import (
+    ContextEnvelope,
+    PromptBuilder,
+    StablePrefixManager,
+    WorkspaceContext,
+    WorkspaceContextOptions,
+    WorkspacePrefixManager,
+    WorkspacePrefixState,
+)
 
 
 def test_workspace_context_builds_outside_git_repo(tmp_path, monkeypatch):
@@ -102,3 +110,111 @@ def test_workspace_context_fingerprint_changes_when_git_status_changes(tmp_path)
     dirty_fingerprint = WorkspaceContext.build(tmp_path, WorkspaceContextOptions()).fingerprint()
 
     assert dirty_fingerprint != clean_fingerprint
+
+
+def test_stable_prefix_key_is_stable_for_same_tools():
+    tools = [
+        {
+            "type": "function",
+            "function": {"name": "read_file", "parameters": {"type": "object"}},
+        }
+    ]
+
+    first = StablePrefixManager().get_or_build(tools)
+    second = StablePrefixManager().get_or_build(tools)
+
+    assert first.text == second.text
+    assert first.prompt_cache_key == second.prompt_cache_key
+
+
+def test_tool_signature_changes_when_tool_surface_changes():
+    manager = StablePrefixManager()
+
+    first = manager.get_or_build([{"type": "function", "function": {"name": "read_file"}}])
+    second = manager.get_or_build(
+        [{"type": "function", "function": {"name": "write_file"}}]
+    )
+
+    assert first.tool_signature != second.tool_signature
+    assert first.prompt_cache_key != second.prompt_cache_key
+
+
+def test_prompt_builder_message_order():
+    stable = StablePrefixManager().get_or_build([])
+    workspace = WorkspacePrefixState(
+        text="<workspace_context>ctx</workspace_context>",
+        workspace_fingerprint="w",
+        cwd=".",
+        repo_root=None,
+        branch=None,
+        default_branch=None,
+        status_hash="s",
+        recent_commits_hash="c",
+        project_docs_hash="d",
+        file_tree_hash="f",
+    )
+    envelope = ContextEnvelope(
+        stable_prefix=stable,
+        workspace_prefix=workspace,
+        session_summary=None,
+        recent_messages=[{"role": "assistant", "content": "old"}],
+        current_task="hello",
+        full_context_key="full",
+    )
+
+    messages = PromptBuilder().to_messages(envelope, mode="run")
+
+    assert messages[0] == {"role": "system", "content": stable.text}
+    assert messages[1] == {"role": "user", "content": workspace.text}
+    assert messages[2] == {"role": "assistant", "content": "old"}
+    assert messages[3]["role"] == "user"
+    assert "<current_task>" in messages[3]["content"]
+    assert "mode: run" in messages[3]["content"]
+    assert "hello" in messages[3]["content"]
+
+
+def test_prompt_builder_includes_session_summary_before_recent_messages():
+    stable = StablePrefixManager().get_or_build([])
+    workspace = WorkspacePrefixState(
+        text="<workspace_context>ctx</workspace_context>",
+        workspace_fingerprint="w",
+        cwd=".",
+        repo_root=None,
+        branch=None,
+        default_branch=None,
+        status_hash="s",
+        recent_commits_hash="c",
+        project_docs_hash="d",
+        file_tree_hash="f",
+    )
+    envelope = ContextEnvelope(
+        stable_prefix=stable,
+        workspace_prefix=workspace,
+        session_summary="summary",
+        recent_messages=[{"role": "assistant", "content": "old"}],
+        current_task="hello",
+        full_context_key="full",
+    )
+
+    messages = PromptBuilder().to_messages(envelope, mode="chat")
+
+    assert messages[2] == {
+        "role": "user",
+        "content": "<session_summary>\nsummary\n</session_summary>",
+    }
+    assert messages[3] == {"role": "assistant", "content": "old"}
+    assert "mode: chat" in messages[4]["content"]
+
+
+def test_workspace_prefix_reuses_state_for_same_fingerprint(tmp_path, monkeypatch):
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent.resolve()))
+    (tmp_path / "README.md").write_text("hello project", encoding="utf-8")
+    context = WorkspaceContext.build(tmp_path, WorkspaceContextOptions())
+    manager = WorkspacePrefixManager()
+
+    first = manager.get_or_build(context)
+    second = manager.get_or_build(context)
+
+    assert first is second
+    assert first.text == second.text
+    assert first.workspace_fingerprint == context.fingerprint()

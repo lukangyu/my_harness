@@ -34,6 +34,38 @@ IGNORED_DIRS = {
     ".coding-agent",
 }
 
+PROMPT_VERSION = "context-v1"
+STABLE_PREFIX_TEMPLATE = """<coding_agent_prefix version="context-v1">
+<identity>
+You are coding-agent, a local AI coding assistant.
+</identity>
+
+<operating_principles>
+- Inspect relevant files before editing.
+- Prefer small, focused changes.
+- Verify changes with allowed commands when practical.
+- Do not claim tests passed unless tool results show they passed.
+</operating_principles>
+
+<safety_contract>
+- Work only through provided tools.
+- File access is limited by the workspace sandbox.
+- Shell commands are subject to command policy.
+- If a tool is rejected or fails, report the reason and adapt.
+</safety_contract>
+
+<tool_contract>
+- Use list_files/read_file/search_text to inspect.
+- Use write_file only for intentional file writes.
+- run_shell may be rejected by policy.
+- apply_patch is currently unsupported.
+</tool_contract>
+
+<response_contract>
+- Final answers should summarize changes, files touched, verification, and residual risk.
+</response_contract>
+</coding_agent_prefix>"""
+
 
 @dataclass(frozen=True)
 class WorkspaceContextOptions:
@@ -102,6 +134,151 @@ class WorkspaceContext:
                 "file_tree": self.file_tree,
             }
         )
+
+
+@dataclass(frozen=True)
+class StablePrefixState:
+    text: str
+    system_hash: str
+    tool_signature: str
+    rules_hash: str
+    prompt_cache_key: str
+    prompt_version: str
+
+
+class StablePrefixManager:
+    def __init__(self) -> None:
+        self._state: StablePrefixState | None = None
+
+    def get_or_build(self, tool_schemas: list[dict[str, Any]]) -> StablePrefixState:
+        system_hash = _hash_text(STABLE_PREFIX_TEMPLATE)
+        tool_signature = _hash_json(tool_schemas)
+        rules_hash = _hash_text("")
+        prompt_cache_key = _hash_text(
+            PROMPT_VERSION + system_hash + tool_signature + rules_hash
+        )
+        if self._state and self._state.prompt_cache_key == prompt_cache_key:
+            return self._state
+        self._state = StablePrefixState(
+            text=STABLE_PREFIX_TEMPLATE,
+            system_hash=system_hash,
+            tool_signature=tool_signature,
+            rules_hash=rules_hash,
+            prompt_cache_key=prompt_cache_key,
+            prompt_version=PROMPT_VERSION,
+        )
+        return self._state
+
+
+@dataclass(frozen=True)
+class WorkspacePrefixState:
+    text: str
+    workspace_fingerprint: str
+    cwd: str
+    repo_root: str | None
+    branch: str | None
+    default_branch: str | None
+    status_hash: str
+    recent_commits_hash: str
+    project_docs_hash: str
+    file_tree_hash: str
+
+
+@dataclass(frozen=True)
+class ContextEnvelope:
+    stable_prefix: StablePrefixState
+    workspace_prefix: WorkspacePrefixState
+    session_summary: str | None
+    recent_messages: list[dict[str, Any]]
+    current_task: str
+    full_context_key: str
+
+
+class PromptBuilder:
+    def to_messages(self, envelope: ContextEnvelope, mode: str) -> list[dict[str, Any]]:
+        messages = [
+            {"role": "system", "content": envelope.stable_prefix.text},
+            {"role": "user", "content": envelope.workspace_prefix.text},
+        ]
+        if envelope.session_summary:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"<session_summary>\n"
+                        f"{envelope.session_summary}\n"
+                        f"</session_summary>"
+                    ),
+                }
+            )
+        messages.extend(envelope.recent_messages)
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    f"<current_task>\n"
+                    f"mode: {mode}\n"
+                    f"content:\n{envelope.current_task}\n"
+                    f"</current_task>"
+                ),
+            }
+        )
+        return messages
+
+
+class WorkspacePrefixManager:
+    def __init__(self) -> None:
+        self._state: WorkspacePrefixState | None = None
+
+    def get_or_build(self, context: WorkspaceContext) -> WorkspacePrefixState:
+        fingerprint = context.fingerprint()
+        if self._state and self._state.workspace_fingerprint == fingerprint:
+            return self._state
+        text = render_workspace_context(context)
+        self._state = WorkspacePrefixState(
+            text=text,
+            workspace_fingerprint=fingerprint,
+            cwd=str(context.cwd),
+            repo_root=str(context.repo_root) if context.repo_root else None,
+            branch=context.branch,
+            default_branch=context.default_branch,
+            status_hash=_hash_text(context.status),
+            recent_commits_hash=_hash_json(context.recent_commits),
+            project_docs_hash=_hash_json(context.project_docs),
+            file_tree_hash=_hash_json(context.file_tree),
+        )
+        return self._state
+
+
+def render_workspace_context(context: WorkspaceContext) -> str:
+    lines = [
+        "<workspace_context>",
+        f"cwd: {context.cwd}",
+        f"repo_root: {context.repo_root if context.repo_root else ''}",
+        f"is_git_repo: {str(context.repo_root is not None).lower()}",
+        f"branch: {context.branch or ''}",
+        f"default_branch: {context.default_branch or ''}",
+        "",
+        "git_status:",
+    ]
+    lines.extend([f"  {line}" for line in context.status.splitlines()] or ["  clean"])
+    lines.append("")
+    lines.append("recent_commits:")
+    lines.extend([f"  {line}" for line in context.recent_commits] or ["  none"])
+    lines.append("")
+    lines.append("file_tree:")
+    lines.extend([f"  {line}" for line in context.file_tree] or ["  none"])
+    lines.append("")
+    lines.append("project_docs:")
+    if context.project_docs:
+        for path, content in context.project_docs.items():
+            lines.append(f'  <doc path="{path}">')
+            lines.extend(f"  {line}" for line in content.splitlines())
+            lines.append("  </doc>")
+    else:
+        lines.append("  none")
+    lines.append("</workspace_context>")
+    return "\n".join(lines)
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -190,6 +367,10 @@ def _clip(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
     return text[:max_chars] + "\n... [truncated]"
+
+
+def _hash_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _hash_json(value: Any) -> str:
