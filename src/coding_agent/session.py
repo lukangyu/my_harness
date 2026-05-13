@@ -58,7 +58,6 @@ def _validate_session_record(record: Any, index: int) -> dict[str, Any]:
         _require_string_field(record, index, "tool_call_id")
         _require_string_field(record, index, "name")
         _require_string_field(record, index, "content")
-        return dict(record)
 
     content = record.get("content")
     if role == "user" and not isinstance(content, str):
