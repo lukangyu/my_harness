@@ -6,7 +6,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from coding_agent.context import ContextManager, PromptBuilder, WorkspaceContextOptions
+from coding_agent.context import (
+    ContextManager,
+    PromptBuilder,
+    UsageStats,
+    WorkspaceContextOptions,
+)
 from coding_agent.tools import ToolRegistry
 
 
@@ -21,6 +26,7 @@ class AgentResult:
     messages: list[dict[str, Any]]
     conversation_messages: list[dict[str, Any]]
     reached_max_steps: bool = False
+    usage: UsageStats | None = None
 
 
 class AgentLoop:
@@ -59,9 +65,11 @@ class AgentLoop:
         messages = self.prompt_builder.to_messages(envelope, mode=mode)
         conversation_messages = deepcopy(envelope.recent_messages)
         conversation_messages.append({"role": "user", "content": envelope.current_task})
+        usage: UsageStats | None = None
 
         for _ in range(self.max_steps):
             response = self.client.chat(messages, tool_schemas)
+            usage = response.get("usage")
             assistant_message = response["message"]
             messages.append(assistant_message)
             conversation_messages.append(deepcopy(assistant_message))
@@ -72,6 +80,7 @@ class AgentLoop:
                     final_answer=assistant_message.get("content") or "",
                     messages=messages,
                     conversation_messages=conversation_messages,
+                    usage=usage,
                 )
 
             for tool_call in tool_calls:
@@ -84,6 +93,7 @@ class AgentLoop:
             messages=messages,
             conversation_messages=conversation_messages,
             reached_max_steps=True,
+            usage=usage,
         )
 
     def _tool_message(self, tool_call: dict[str, Any]) -> dict[str, Any]:

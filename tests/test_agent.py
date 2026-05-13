@@ -5,7 +5,7 @@ from pathlib import Path
 import httpx
 
 from coding_agent.agent import AgentLoop
-from coding_agent.context import WorkspaceContextOptions
+from coding_agent.context import UsageStats, WorkspaceContextOptions
 from coding_agent.llm import LLMError, OpenAICompatibleClient
 from coding_agent.policy import CommandPolicy
 from coding_agent.sandbox import WorkspaceSandbox
@@ -59,9 +59,13 @@ def test_agent_runs_tool_then_returns_final_answer(tmp_path):
                             json.dumps({"path": "notes.txt", "content": "hello"}),
                         )
                     ],
-                }
+                },
+                "usage": UsageStats(input_tokens=100, output_tokens=5, cached_tokens=40),
             },
-            {"message": {"role": "assistant", "content": "done"}},
+            {
+                "message": {"role": "assistant", "content": "done"},
+                "usage": UsageStats(input_tokens=120, output_tokens=8, cached_tokens=90),
+            },
         ]
     )
     agent = AgentLoop(
@@ -75,6 +79,7 @@ def test_agent_runs_tool_then_returns_final_answer(tmp_path):
     result = agent.run("write a note")
 
     assert result.final_answer == "done"
+    assert result.usage == UsageStats(input_tokens=120, output_tokens=8, cached_tokens=90)
     assert result.reached_max_steps is False
     assert (tmp_path / "notes.txt").read_text(encoding="utf-8") == "hello"
     assert client.calls[0]["messages"][0]["role"] == "system"
@@ -152,7 +157,8 @@ def test_agent_stops_after_max_steps(tmp_path):
                     "role": "assistant",
                     "content": None,
                     "tool_calls": [tool_call("list_files", "{}")],
-                }
+                },
+                "usage": UsageStats(input_tokens=80, output_tokens=12, cached_tokens=20),
             }
         ]
     )
@@ -168,6 +174,7 @@ def test_agent_stops_after_max_steps(tmp_path):
 
     assert result.reached_max_steps is True
     assert "max steps" in result.final_answer.lower()
+    assert result.usage == UsageStats(input_tokens=80, output_tokens=12, cached_tokens=20)
 
 
 def test_agent_places_prior_messages_after_workspace_context(tmp_path):
@@ -298,7 +305,14 @@ def test_llm_client_posts_openai_compatible_chat_request(monkeypatch):
         return httpx.Response(
             200,
             request=httpx.Request("POST", url),
-            json={"choices": [{"message": {"role": "assistant", "content": "hello"}}]},
+            json={
+                "choices": [{"message": {"role": "assistant", "content": "hello"}}],
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 30,
+                    "prompt_tokens_details": {"cached_tokens": 70},
+                },
+            },
         )
 
     monkeypatch.setattr(httpx, "post", fake_post)
@@ -306,7 +320,10 @@ def test_llm_client_posts_openai_compatible_chat_request(monkeypatch):
 
     result = client.chat([{"role": "user", "content": "hi"}], [{"type": "function"}])
 
-    assert result == {"message": {"role": "assistant", "content": "hello"}}
+    assert result == {
+        "message": {"role": "assistant", "content": "hello"},
+        "usage": UsageStats(input_tokens=100, output_tokens=30, cached_tokens=70),
+    }
     assert requests == [
         {
             "url": "https://example.test/v1/chat/completions",

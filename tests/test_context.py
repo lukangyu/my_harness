@@ -8,6 +8,7 @@ from coding_agent.context import (
     MessageBudget,
     PromptBuilder,
     StablePrefixManager,
+    UsageStats,
     WorkspaceContext,
     WorkspaceContextOptions,
     WorkspacePrefixManager,
@@ -15,6 +16,34 @@ from coding_agent.context import (
     estimate_tokens,
     render_workspace_context,
 )
+
+
+def test_usage_stats_parses_openai_cached_tokens():
+    stats = UsageStats.from_response_usage(
+        {
+            "prompt_tokens": 100,
+            "completion_tokens": 25,
+            "prompt_tokens_details": {"cached_tokens": 85},
+        }
+    )
+
+    assert stats == UsageStats(input_tokens=100, output_tokens=25, cached_tokens=85)
+    assert stats.cache_hit_ratio == 0.85
+
+
+def test_usage_stats_parses_generic_input_output_shape():
+    stats = UsageStats.from_response_usage(
+        {"input_tokens": 50, "output_tokens": 10, "cached_tokens": 20}
+    )
+
+    assert stats == UsageStats(input_tokens=50, output_tokens=10, cached_tokens=20)
+    assert stats.cache_hit_ratio == 0.4
+
+
+def test_usage_stats_cache_hit_ratio_is_none_without_input_or_cached_tokens():
+    assert UsageStats(input_tokens=0, output_tokens=10, cached_tokens=5).cache_hit_ratio is None
+    assert UsageStats(input_tokens=10, output_tokens=10, cached_tokens=None).cache_hit_ratio is None
+    assert UsageStats.from_response_usage(None) is None
 
 
 def test_workspace_context_builds_outside_git_repo(tmp_path, monkeypatch):

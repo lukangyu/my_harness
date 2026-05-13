@@ -2,8 +2,9 @@ from typer.testing import CliRunner
 
 import coding_agent.cli as cli_module
 from coding_agent.agent import AgentResult
-from coding_agent.cli import app
+from coding_agent.cli import RunTaskResult, app
 from coding_agent.config import ConfigError
+from coding_agent.context import UsageStats
 from coding_agent.session import SessionStore
 
 
@@ -44,7 +45,7 @@ def test_chat_reuses_conversation_messages(monkeypatch):
 
     def run_task(task, prior_messages, mode):
         calls.append({"task": task, "prior_messages": list(prior_messages), "mode": mode})
-        return (
+        return RunTaskResult(
             AgentResult(
                 final_answer=f"answer to {task}",
                 messages=[
@@ -59,6 +60,7 @@ def test_chat_reuses_conversation_messages(monkeypatch):
                 ],
             ),
             "session.json",
+            False,
         )
 
     monkeypatch.setattr(cli_module, "_run_task", run_task)
@@ -91,7 +93,7 @@ def test_chat_resume_path_reports_loaded_message_count(tmp_path, monkeypatch):
 
     def run_task(task, prior_messages, mode):
         calls.append({"task": task, "prior_messages": list(prior_messages), "mode": mode})
-        return (
+        return RunTaskResult(
             AgentResult(
                 final_answer="next answer",
                 messages=[],
@@ -102,6 +104,7 @@ def test_chat_resume_path_reports_loaded_message_count(tmp_path, monkeypatch):
                 ],
             ),
             "session.json",
+            False,
         )
 
     monkeypatch.setattr(cli_module, "_run_task", run_task)
@@ -161,3 +164,50 @@ def test_chat_resume_and_resume_latest_conflict_exits_with_error(tmp_path):
 
     assert result.exit_code == 1
     assert "--resume and --resume-latest cannot be used together" in result.output
+
+
+def test_run_prints_cache_stats_when_enabled_and_usage_has_ratio(monkeypatch):
+    runner = CliRunner()
+
+    def run_task(task, prior_messages, mode):
+        return RunTaskResult(
+            AgentResult(
+                final_answer="answer",
+                messages=[],
+                conversation_messages=[],
+                usage=UsageStats(input_tokens=100, output_tokens=10, cached_tokens=85),
+            ),
+            "session.json",
+            True,
+        )
+
+    monkeypatch.setattr(cli_module, "_run_task", run_task)
+
+    result = runner.invoke(app, ["run", "summarize"])
+
+    assert result.exit_code == 0
+    assert "answer" in result.output
+    assert "Cache: 85% cached input tokens" in result.output
+
+
+def test_run_omits_cache_stats_when_disabled(monkeypatch):
+    runner = CliRunner()
+
+    def run_task(task, prior_messages, mode):
+        return RunTaskResult(
+            AgentResult(
+                final_answer="answer",
+                messages=[],
+                conversation_messages=[],
+                usage=UsageStats(input_tokens=100, output_tokens=10, cached_tokens=85),
+            ),
+            "session.json",
+            False,
+        )
+
+    monkeypatch.setattr(cli_module, "_run_task", run_task)
+
+    result = runner.invoke(app, ["run", "summarize"])
+
+    assert result.exit_code == 0
+    assert "Cache:" not in result.output

@@ -80,6 +80,35 @@ class WorkspaceContextOptions:
 
 
 @dataclass(frozen=True)
+class UsageStats:
+    input_tokens: int | None
+    output_tokens: int | None
+    cached_tokens: int | None
+
+    @property
+    def cache_hit_ratio(self) -> float | None:
+        if self.input_tokens and self.cached_tokens is not None:
+            return self.cached_tokens / self.input_tokens
+        return None
+
+    @classmethod
+    def from_response_usage(cls, usage: Any) -> "UsageStats | None":
+        if usage is None:
+            return None
+
+        prompt_tokens_details = _usage_value(usage, "prompt_tokens_details")
+        cached_tokens = _usage_value(usage, "cached_tokens")
+        if cached_tokens is None and prompt_tokens_details is not None:
+            cached_tokens = _usage_value(prompt_tokens_details, "cached_tokens")
+
+        return cls(
+            input_tokens=_first_usage_value(usage, "prompt_tokens", "input_tokens"),
+            output_tokens=_first_usage_value(usage, "completion_tokens", "output_tokens"),
+            cached_tokens=cached_tokens,
+        )
+
+
+@dataclass(frozen=True)
 class WorkspaceContext:
     cwd: Path
     repo_root: Path | None
@@ -539,3 +568,27 @@ def _hash_json(value: Any) -> str:
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, ensure_ascii=False).encode("utf-8")
     ).hexdigest()
+
+
+def _usage_value(usage: Any, key: str) -> int | dict[str, Any] | None:
+    if isinstance(usage, dict):
+        value = usage.get(key)
+    else:
+        value = getattr(usage, key, None)
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, dict):
+        return value
+    return None
+
+
+def _first_usage_value(usage: Any, *keys: str) -> int | None:
+    for key in keys:
+        value = _usage_value(usage, key)
+        if isinstance(value, int):
+            return value
+    return None

@@ -4,6 +4,8 @@ from typing import Any
 
 import httpx
 
+from coding_agent.context import UsageStats
+
 
 class LLMError(RuntimeError):
     pass
@@ -34,4 +36,7 @@ class OpenAICompatibleClient:
             raise LLMError(str(exc)) from exc
 
         data = response.json()
-        return {"message": data["choices"][0]["message"]}
+        return {
+            "message": data["choices"][0]["message"],
+            "usage": UsageStats.from_response_usage(data.get("usage")),
+        }

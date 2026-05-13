@@ -1,4 +1,5 @@
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
@@ -19,6 +20,13 @@ app = typer.Typer(help="AI coding assistant CLI")
 console = Console()
 
 
+@dataclass(frozen=True)
+class RunTaskResult:
+    result: AgentResult
+    session_path: Path
+    show_cache_stats: bool
+
+
 @app.command()
 def init(path: Path = typer.Option(Path("."), "--path", "-p", help="Project root")) -> None:
     """Create a project-local coding-agent config."""
@@ -36,13 +44,12 @@ def init(path: Path = typer.Option(Path("."), "--path", "-p", help="Project root
 def run(task: str) -> None:
     """Run one coding task and exit."""
     try:
-        result, session_path = _run_task(task, None, mode="run")
+        task_result = _run_task(task, None, mode="run")
     except (ConfigError, LLMError) as exc:
         console.print(f"[red]Error:[/] {exc}")
         raise typer.Exit(1) from exc
 
-    console.print(result.final_answer)
-    console.print(f"Session: {session_path}")
+    _print_task_result(task_result)
 
 
 @app.command()
@@ -75,14 +82,14 @@ def chat(
             continue
 
         try:
-            result, session_path = _run_task(command, messages, mode="chat")
+            task_result = _run_task(command, messages, mode="chat")
         except (ConfigError, LLMError) as exc:
             console.print(f"[red]Error:[/] {exc}")
             continue
 
+        result = task_result.result
         messages[:] = result.conversation_messages
-        console.print(result.final_answer)
-        console.print(f"Session: {session_path}")
+        _print_task_result(task_result)
 
 
 def _load_chat_messages(resume: Optional[Path], resume_latest: bool) -> list[dict[str, Any]]:
@@ -99,7 +106,7 @@ def _run_task(
     task: str,
     prior_messages: list[dict[str, Any]] | None,
     mode: str,
-) -> tuple[AgentResult, Path]:
+) -> RunTaskResult:
     config = load_config(Path.cwd())
     sandbox = WorkspaceSandbox(config.workspace.root)
     policy = CommandPolicy(allow=config.commands.allow, deny=config.commands.deny)
@@ -128,7 +135,16 @@ def _run_task(
     )
     result = agent.run(task, prior_messages=prior_messages, mode=mode)
     session_path = SessionStore(config.project_root).save(result.conversation_messages)
-    return result, session_path
+    return RunTaskResult(result, session_path, config.context.show_cache_stats)
+
+
+def _print_task_result(task_result: RunTaskResult) -> None:
+    console.print(task_result.result.final_answer)
+    if task_result.show_cache_stats and task_result.result.usage:
+        ratio = task_result.result.usage.cache_hit_ratio
+        if ratio is not None:
+            console.print(f"Cache: {ratio:.0%} cached input tokens")
+    console.print(f"Session: {task_result.session_path}")
 
 
 DEFAULT_CONFIG = """[model]
