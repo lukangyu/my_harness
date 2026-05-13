@@ -1,6 +1,7 @@
 from typer.testing import CliRunner
 
 import coding_agent.cli as cli_module
+from coding_agent.agent import AgentResult
 from coding_agent.cli import app
 from coding_agent.config import ConfigError
 
@@ -34,3 +35,45 @@ def test_chat_reports_task_error_and_continues(monkeypatch):
     assert "missing config" in result.output
     assert "Messages: 0" in result.output
     assert calls == [{"task": "hello", "prior_messages": [], "mode": "chat"}]
+
+
+def test_chat_reuses_conversation_messages(monkeypatch):
+    runner = CliRunner()
+    calls = []
+
+    def run_task(task, prior_messages, mode):
+        calls.append({"task": task, "prior_messages": list(prior_messages), "mode": mode})
+        return (
+            AgentResult(
+                final_answer=f"answer to {task}",
+                messages=[
+                    {"role": "system", "content": "<coding_agent_prefix>"},
+                    {"role": "user", "content": "<workspace_context>"},
+                    {"role": "user", "content": f"<current_task>{task}</current_task>"},
+                    {"role": "assistant", "content": f"answer to {task}"},
+                ],
+                conversation_messages=[
+                    {"role": "user", "content": task},
+                    {"role": "assistant", "content": f"answer to {task}"},
+                ],
+            ),
+            "session.json",
+        )
+
+    monkeypatch.setattr(cli_module, "_run_task", run_task)
+
+    result = runner.invoke(app, ["chat"], input="first\n/status\nsecond\n/exit\n")
+
+    assert result.exit_code == 0
+    assert "Messages: 2" in result.output
+    assert calls == [
+        {"task": "first", "prior_messages": [], "mode": "chat"},
+        {
+            "task": "second",
+            "prior_messages": [
+                {"role": "user", "content": "first"},
+                {"role": "assistant", "content": "answer to first"},
+            ],
+            "mode": "chat",
+        },
+    ]

@@ -91,6 +91,26 @@ def test_agent_runs_tool_then_returns_final_answer(tmp_path):
         "ok": True,
         "path": "notes.txt",
     }
+    assert result.conversation_messages == [
+        {"role": "user", "content": "write a note"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                tool_call(
+                    "write_file",
+                    json.dumps({"path": "notes.txt", "content": "hello"}),
+                )
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "name": "write_file",
+            "content": json.dumps({"ok": True, "path": "notes.txt"}, ensure_ascii=False),
+        },
+        {"role": "assistant", "content": "done"},
+    ]
 
 
 def test_agent_reports_invalid_json_tool_arguments(tmp_path):
@@ -172,6 +192,75 @@ def test_agent_places_prior_messages_after_workspace_context(tmp_path):
     assert messages[3]["role"] == "user"
     assert "<current_task>" in messages[3]["content"]
     assert "new task" in messages[3]["content"]
+
+
+def test_agent_result_conversation_messages_exclude_generated_prompt_blocks(tmp_path):
+    client = FakeClient([{"message": {"role": "assistant", "content": "answer"}}])
+    agent = AgentLoop(
+        client,
+        make_tools(tmp_path),
+        max_steps=1,
+        cwd=tmp_path,
+        context_options=context_options(),
+    )
+    prior_messages = [
+        {"role": "user", "content": "earlier"},
+        {"role": "assistant", "content": "old answer"},
+    ]
+
+    result = agent.run("new task", prior_messages=prior_messages, mode="chat")
+
+    assert result.conversation_messages == [
+        {"role": "user", "content": "earlier"},
+        {"role": "assistant", "content": "old answer"},
+        {"role": "user", "content": "new task"},
+        {"role": "assistant", "content": "answer"},
+    ]
+    serialized = json.dumps(result.conversation_messages)
+    assert "<coding_agent_prefix" not in serialized
+    assert "<workspace_context>" not in serialized
+    assert "<current_task>" not in serialized
+
+
+def test_agent_reuses_sanitized_conversation_without_duplicating_prompt_blocks(tmp_path):
+    first_client = FakeClient([{"message": {"role": "assistant", "content": "first"}}])
+    first_agent = AgentLoop(
+        first_client,
+        make_tools(tmp_path),
+        max_steps=1,
+        cwd=tmp_path,
+        context_options=context_options(),
+    )
+    first_result = first_agent.run("first task", mode="chat")
+
+    second_client = FakeClient([{"message": {"role": "assistant", "content": "second"}}])
+    second_agent = AgentLoop(
+        second_client,
+        make_tools(tmp_path),
+        max_steps=1,
+        cwd=tmp_path,
+        context_options=context_options(),
+    )
+
+    second_agent.run(
+        "second task",
+        prior_messages=first_result.conversation_messages,
+        mode="chat",
+    )
+
+    second_messages = second_client.calls[0]["messages"]
+    rendered = json.dumps(second_messages)
+    assert rendered.count("<coding_agent_prefix") == 1
+    assert rendered.count("<workspace_context>") == 1
+    assert rendered.count("<current_task>") == 1
+    assert second_messages[2:] == [
+        {"role": "user", "content": "first task"},
+        {"role": "assistant", "content": "first"},
+        {
+            "role": "user",
+            "content": "<current_task>\nmode: chat\ncontent:\nsecond task\n</current_task>",
+        },
+    ]
 
 
 def test_agent_includes_workspace_context_for_empty_prior_messages(tmp_path):

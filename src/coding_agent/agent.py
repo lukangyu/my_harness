@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -18,6 +19,7 @@ class ChatClient(Protocol):
 class AgentResult:
     final_answer: str
     messages: list[dict[str, Any]]
+    conversation_messages: list[dict[str, Any]]
     reached_max_steps: bool = False
 
 
@@ -55,22 +57,32 @@ class AgentLoop:
             mode=mode,
         )
         messages = self.prompt_builder.to_messages(envelope, mode=mode)
+        conversation_messages = deepcopy(envelope.recent_messages)
+        conversation_messages.append({"role": "user", "content": envelope.current_task})
 
         for _ in range(self.max_steps):
             response = self.client.chat(messages, tool_schemas)
             assistant_message = response["message"]
             messages.append(assistant_message)
+            conversation_messages.append(deepcopy(assistant_message))
 
             tool_calls = assistant_message.get("tool_calls") or []
             if not tool_calls:
-                return AgentResult(final_answer=assistant_message.get("content") or "", messages=messages)
+                return AgentResult(
+                    final_answer=assistant_message.get("content") or "",
+                    messages=messages,
+                    conversation_messages=conversation_messages,
+                )
 
             for tool_call in tool_calls:
-                messages.append(self._tool_message(tool_call))
+                tool_message = self._tool_message(tool_call)
+                messages.append(tool_message)
+                conversation_messages.append(deepcopy(tool_message))
 
         return AgentResult(
             final_answer="Stopped after reaching max steps.",
             messages=messages,
+            conversation_messages=conversation_messages,
             reached_max_steps=True,
         )
 

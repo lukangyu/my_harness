@@ -71,7 +71,7 @@ def chat() -> None:
             console.print(f"[red]Error:[/] {exc}")
             continue
 
-        messages[:] = result.messages
+        messages[:] = result.conversation_messages
         console.print(result.final_answer)
         console.print(f"Session: {session_path}")
 
@@ -108,7 +108,7 @@ def _run_task(
         recent_message_tokens=config.context.recent_message_tokens,
     )
     result = agent.run(task, prior_messages=prior_messages, mode=mode)
-    session_path = SessionStore(config.project_root).save(result.messages)
+    session_path = SessionStore(config.project_root).save(result.conversation_messages)
     return result, session_path
 
 
