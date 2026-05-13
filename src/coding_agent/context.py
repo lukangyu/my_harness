@@ -215,19 +215,61 @@ class MessageBudget:
         if self.recent_message_tokens <= 0:
             return []
 
-        selected: list[dict[str, Any]] = []
+        selected_groups: list[list[dict[str, Any]]] = []
         used_tokens = 0
-        for message in reversed(messages):
-            prepared = self._prepare_message(message)
-            tokens = self._message_tokens(prepared)
+        for group in reversed(self._message_groups(messages)):
+            if not group:
+                continue
+            tokens = sum(self._message_tokens(message) for message in group)
             if used_tokens + tokens > self.recent_message_tokens:
-                if selected:
+                if selected_groups:
                     break
                 continue
-            selected.append(prepared)
+            selected_groups.append(group)
             used_tokens += tokens
-        selected.reverse()
-        return selected
+        selected_groups.reverse()
+        return [
+            message
+            for group in selected_groups
+            for message in group
+        ]
+
+    def _message_groups(self, messages: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+        prepared_messages = [self._prepare_message(message) for message in messages]
+        groups: list[list[dict[str, Any]]] = []
+        index = 0
+        while index < len(prepared_messages):
+            message = prepared_messages[index]
+            if message.get("role") == "tool":
+                index += 1
+                continue
+
+            tool_call_ids = self._tool_call_ids(message)
+            if not tool_call_ids:
+                groups.append([message])
+                index += 1
+                continue
+
+            group = [message]
+            found_ids: set[str] = set()
+            next_index = index + 1
+            while next_index < len(prepared_messages):
+                next_message = prepared_messages[next_index]
+                if next_message.get("role") != "tool":
+                    break
+                tool_call_id = next_message.get("tool_call_id")
+                if tool_call_id not in tool_call_ids or tool_call_id in found_ids:
+                    break
+                group.append(next_message)
+                found_ids.add(tool_call_id)
+                next_index += 1
+
+            if found_ids == tool_call_ids:
+                groups.append(group)
+                index = next_index
+            else:
+                index += 1
+        return groups
 
     def _prepare_message(self, message: dict[str, Any]) -> dict[str, Any]:
         prepared = dict(message)
@@ -244,12 +286,20 @@ class MessageBudget:
         return prepared
 
     def _message_tokens(self, message: dict[str, Any]) -> int:
-        content = message.get("content", "")
-        if isinstance(content, str):
-            text = content
-        else:
-            text = json.dumps(content, sort_keys=True, ensure_ascii=False)
+        text = json.dumps(message, sort_keys=True, ensure_ascii=False)
         return estimate_tokens(text)
+
+    def _tool_call_ids(self, message: dict[str, Any]) -> set[str]:
+        if message.get("role") != "assistant":
+            return set()
+        tool_calls = message.get("tool_calls")
+        if not isinstance(tool_calls, list):
+            return set()
+        return {
+            tool_call["id"]
+            for tool_call in tool_calls
+            if isinstance(tool_call, dict) and isinstance(tool_call.get("id"), str)
+        }
 
 
 class ContextManager:

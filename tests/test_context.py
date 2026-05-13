@@ -302,7 +302,7 @@ def test_message_budget_drops_oldest_recent_messages():
         {"role": "user", "content": "c" * 20, "name": "third"},
     ]
 
-    trimmed = MessageBudget(recent_message_tokens=10).trim_recent_messages(messages)
+    trimmed = MessageBudget(recent_message_tokens=40).trim_recent_messages(messages)
 
     assert trimmed == messages[1:]
 
@@ -314,13 +314,24 @@ def test_message_budget_stops_when_newer_message_exceeds_budget():
         {"role": "user", "content": "new", "name": "newest"},
     ]
 
-    trimmed = MessageBudget(recent_message_tokens=10).trim_recent_messages(messages)
+    trimmed = MessageBudget(recent_message_tokens=20).trim_recent_messages(messages)
 
     assert trimmed == [messages[2]]
 
 
 def test_message_budget_truncates_long_tool_content():
     messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": "{}"},
+                }
+            ],
+        },
         {
             "role": "tool",
             "tool_call_id": "call-1",
@@ -335,6 +346,7 @@ def test_message_budget_truncates_long_tool_content():
     ).trim_recent_messages(messages)
 
     assert trimmed == [
+        messages[0],
         {
             "role": "tool",
             "tool_call_id": "call-1",
@@ -342,7 +354,80 @@ def test_message_budget_truncates_long_tool_content():
             "metadata": {"kept": True},
         }
     ]
-    assert messages[0]["content"] == "x" * 12
+    assert messages[1]["content"] == "x" * 12
+
+
+def test_message_budget_drops_tool_response_without_retained_assistant_tool_call():
+    messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call-1", "content": "x" * 60},
+        {"role": "user", "content": "newest"},
+    ]
+
+    trimmed = MessageBudget(recent_message_tokens=20).trim_recent_messages(messages)
+
+    assert trimmed == [messages[2]]
+
+
+def test_message_budget_drops_assistant_tool_call_without_all_tool_responses():
+    messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "first", "arguments": "{}"},
+                },
+                {
+                    "id": "call-2",
+                    "type": "function",
+                    "function": {"name": "second", "arguments": "{}"},
+                },
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call-1", "content": "first"},
+        {"role": "tool", "tool_call_id": "call-2", "content": "y" * 80},
+        {"role": "user", "content": "newest"},
+    ]
+
+    trimmed = MessageBudget(recent_message_tokens=30).trim_recent_messages(messages)
+
+    assert trimmed == [messages[3]]
+
+
+def test_message_budget_counts_large_tool_calls_payload_with_empty_content():
+    messages = [
+        {"role": "user", "content": "older"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": "x" * 200},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call-1", "content": "result"},
+        {"role": "user", "content": "newest"},
+    ]
+
+    trimmed = MessageBudget(recent_message_tokens=20).trim_recent_messages(messages)
+
+    assert trimmed == [messages[3]]
 
 
 def test_context_manager_builds_envelope_with_stable_key(tmp_path, monkeypatch):
@@ -353,7 +438,7 @@ def test_context_manager_builds_envelope_with_stable_key(tmp_path, monkeypatch):
         include_recent_commits=False,
         include_file_tree=False,
     )
-    manager = ContextManager(tmp_path, options, recent_message_tokens=5)
+    manager = ContextManager(tmp_path, options, recent_message_tokens=20)
     prior_messages = [
         {"role": "user", "content": "a" * 20, "name": "drop-me"},
         {"role": "assistant", "content": "b" * 20, "name": "keep-me"},
