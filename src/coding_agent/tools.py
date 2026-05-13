@@ -61,6 +61,8 @@ def create_default_tools(sandbox: WorkspaceSandbox, shell: ShellRunner) -> ToolR
 
     def list_files(arguments: dict[str, Any]) -> dict[str, Any]:
         root = sandbox.resolve(arguments.get("path", "."))
+        if not root.exists():
+            raise FileNotFoundError(f"path not found: {sandbox.relative_path(root)}")
         paths = [path for path in root.rglob("*") if path.is_file()] if root.is_dir() else [root]
         return {"ok": True, "files": sorted(sandbox.relative_path(path) for path in paths)}
 

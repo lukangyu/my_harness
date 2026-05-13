@@ -56,6 +56,16 @@ def test_list_files_returns_sorted_project_relative_posix_paths(tmp_path):
     assert result == {"ok": True, "files": ["pkg/a.txt", "pkg/b.txt", "pkg/nested/c.txt"]}
 
 
+def test_list_files_returns_error_for_missing_path(tmp_path):
+    tools = make_tools(tmp_path)
+
+    result = tools.call("list_files", {"path": "missing"})
+
+    assert result["ok"] is False
+    assert "missing" in result["error"].lower() or "not found" in result["error"].lower()
+    assert "path" in result["error"].lower()
+
+
 def test_search_text_finds_matches_and_skips_non_utf8_files(tmp_path):
     tools = make_tools(tmp_path)
     (tmp_path / "src").mkdir()
