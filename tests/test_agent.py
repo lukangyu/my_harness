@@ -354,3 +354,41 @@ def test_session_store_saves_records_under_project_sessions(tmp_path, monkeypatc
 
     assert path == Path(tmp_path / ".coding-agent" / "sessions" / "20260513-120000-123456.json")
     assert path.read_text(encoding="utf-8") == json.dumps(records, indent=2, ensure_ascii=False)
+
+
+def test_session_store_loads_saved_records(tmp_path):
+    records = [{"role": "user", "content": "hello"}]
+    path = SessionStore(tmp_path).save(records)
+
+    assert SessionStore.load(path) == records
+
+
+def test_session_store_load_rejects_non_list_json(tmp_path):
+    path = tmp_path / "session.json"
+    path.write_text(json.dumps({"role": "user"}), encoding="utf-8")
+
+    try:
+        SessionStore.load(path)
+    except ValueError as exc:
+        assert "list" in str(exc).lower()
+    else:
+        raise AssertionError("expected ValueError")
+
+
+def test_session_store_latest_and_load_latest_use_newest_session_name(tmp_path):
+    store = SessionStore(tmp_path)
+    store.sessions_dir.mkdir(parents=True)
+    older = store.sessions_dir / "20260513-120000-000001.json"
+    newer = store.sessions_dir / "20260513-120000-000002.json"
+    older.write_text(json.dumps([{"role": "user", "content": "older"}]), encoding="utf-8")
+    newer.write_text(json.dumps([{"role": "user", "content": "newer"}]), encoding="utf-8")
+
+    assert store.latest() == newer
+    assert store.load_latest() == [{"role": "user", "content": "newer"}]
+
+
+def test_session_store_load_latest_returns_none_when_no_sessions(tmp_path):
+    store = SessionStore(tmp_path)
+
+    assert store.latest() is None
+    assert store.load_latest() is None

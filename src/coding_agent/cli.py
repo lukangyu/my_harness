@@ -1,5 +1,6 @@
+import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import typer
 from rich.console import Console
@@ -45,9 +46,17 @@ def run(task: str) -> None:
 
 
 @app.command()
-def chat() -> None:
+def chat(
+    resume: Optional[Path] = typer.Option(None, "--resume", help="Load messages from a session JSON file"),
+    resume_latest: bool = typer.Option(False, "--resume-latest", help="Load the latest saved session"),
+) -> None:
     """Start an interactive coding session."""
-    messages: list[dict[str, Any]] = []
+    try:
+        messages = _load_chat_messages(resume, resume_latest)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        console.print(f"[red]Error:[/] {exc}")
+        raise typer.Exit(1) from exc
+
     console.print("Chat mode. Type /exit to quit.")
 
     while True:
@@ -74,6 +83,14 @@ def chat() -> None:
         messages[:] = result.conversation_messages
         console.print(result.final_answer)
         console.print(f"Session: {session_path}")
+
+
+def _load_chat_messages(resume: Optional[Path], resume_latest: bool) -> list[dict[str, Any]]:
+    if resume is not None:
+        return SessionStore.load(resume)
+    if resume_latest:
+        return SessionStore(Path.cwd()).load_latest() or []
+    return []
 
 
 def _run_task(

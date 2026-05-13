@@ -4,6 +4,7 @@ import coding_agent.cli as cli_module
 from coding_agent.agent import AgentResult
 from coding_agent.cli import app
 from coding_agent.config import ConfigError
+from coding_agent.session import SessionStore
 
 
 def test_run_without_api_key_prints_error_and_exits(tmp_path, monkeypatch):
@@ -77,3 +78,71 @@ def test_chat_reuses_conversation_messages(monkeypatch):
             "mode": "chat",
         },
     ]
+
+
+def test_chat_resume_path_reports_loaded_message_count(tmp_path, monkeypatch):
+    runner = CliRunner()
+    calls = []
+    session_path = tmp_path / "session.json"
+    session_path.write_text(
+        '[{"role": "user", "content": "earlier"}, {"role": "assistant", "content": "answer"}]',
+        encoding="utf-8",
+    )
+
+    def run_task(task, prior_messages, mode):
+        calls.append({"task": task, "prior_messages": list(prior_messages), "mode": mode})
+        return (
+            AgentResult(
+                final_answer="next answer",
+                messages=[],
+                conversation_messages=[
+                    *prior_messages,
+                    {"role": "user", "content": task},
+                    {"role": "assistant", "content": "next answer"},
+                ],
+            ),
+            "session.json",
+        )
+
+    monkeypatch.setattr(cli_module, "_run_task", run_task)
+
+    result = runner.invoke(app, ["chat", "--resume", str(session_path)], input="/status\nnext\n/exit\n")
+
+    assert result.exit_code == 0
+    assert "Messages: 2" in result.output
+    assert calls == [
+        {
+            "task": "next",
+            "prior_messages": [
+                {"role": "user", "content": "earlier"},
+                {"role": "assistant", "content": "answer"},
+            ],
+            "mode": "chat",
+        }
+    ]
+
+
+def test_chat_resume_latest_reports_loaded_message_count(tmp_path, monkeypatch):
+    runner = CliRunner()
+    store = SessionStore(tmp_path)
+    store.sessions_dir.mkdir(parents=True)
+    latest = store.sessions_dir / "20260513-120000-000002.json"
+    latest.write_text('[{"role": "user", "content": "latest"}]', encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli_module, "_run_task", lambda task, prior_messages, mode: None)
+
+    result = runner.invoke(app, ["chat", "--resume-latest"], input="/status\n/exit\n")
+
+    assert result.exit_code == 0
+    assert "Messages: 1" in result.output
+
+
+def test_chat_invalid_resume_exits_with_error(tmp_path):
+    runner = CliRunner()
+    session_path = tmp_path / "session.json"
+    session_path.write_text('{"role": "user"}', encoding="utf-8")
+
+    result = runner.invoke(app, ["chat", "--resume", str(session_path)], input="/status\n")
+
+    assert result.exit_code == 1
+    assert "Error:" in result.output
