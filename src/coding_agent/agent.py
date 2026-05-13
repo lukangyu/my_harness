@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol
 
+from coding_agent.context import ContextManager, PromptBuilder, WorkspaceContextOptions
 from coding_agent.tools import ToolRegistry
-
-
-SYSTEM_PROMPT = "You are a coding agent. Use tools when needed and return a concise final answer."
 
 
 class ChatClient(Protocol):
@@ -23,23 +22,42 @@ class AgentResult:
 
 
 class AgentLoop:
-    def __init__(self, client: ChatClient, tools: ToolRegistry, max_steps: int) -> None:
+    def __init__(
+        self,
+        client: ChatClient,
+        tools: ToolRegistry,
+        max_steps: int,
+        cwd: Path,
+        context_options: WorkspaceContextOptions | None = None,
+        recent_message_tokens: int = 12000,
+    ) -> None:
         self.client = client
         self.tools = tools
         self.max_steps = max_steps
+        self.context_manager = ContextManager(
+            cwd=cwd,
+            options=context_options or WorkspaceContextOptions(),
+            recent_message_tokens=recent_message_tokens,
+        )
+        self.prompt_builder = PromptBuilder()
 
     def run(
         self,
         task: str,
         prior_messages: list[dict[str, Any]] | None = None,
+        mode: str = "run",
     ) -> AgentResult:
-        messages = list(prior_messages or [])
-        if not messages:
-            messages.append({"role": "system", "content": SYSTEM_PROMPT})
-        messages.append({"role": "user", "content": task})
+        tool_schemas = self.tools.schemas()
+        envelope = self.context_manager.build(
+            task=task,
+            prior_messages=list(prior_messages or []),
+            tool_schemas=tool_schemas,
+            mode=mode,
+        )
+        messages = self.prompt_builder.to_messages(envelope, mode=mode)
 
         for _ in range(self.max_steps):
-            response = self.client.chat(messages, self.tools.schemas())
+            response = self.client.chat(messages, tool_schemas)
             assistant_message = response["message"]
             messages.append(assistant_message)
 

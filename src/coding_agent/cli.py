@@ -6,6 +6,7 @@ from rich.console import Console
 
 from coding_agent.agent import AgentLoop, AgentResult
 from coding_agent.config import ConfigError, load_config
+from coding_agent.context import WorkspaceContextOptions
 from coding_agent.llm import LLMError, OpenAICompatibleClient
 from coding_agent.policy import CommandPolicy
 from coding_agent.sandbox import WorkspaceSandbox
@@ -34,7 +35,7 @@ def init(path: Path = typer.Option(Path("."), "--path", "-p", help="Project root
 def run(task: str) -> None:
     """Run one coding task and exit."""
     try:
-        result, session_path = _run_task(task, None)
+        result, session_path = _run_task(task, None, mode="run")
     except (ConfigError, LLMError) as exc:
         console.print(f"[red]Error:[/] {exc}")
         raise typer.Exit(1) from exc
@@ -65,7 +66,7 @@ def chat() -> None:
             continue
 
         try:
-            result, session_path = _run_task(command, messages)
+            result, session_path = _run_task(command, messages, mode="chat")
         except (ConfigError, LLMError) as exc:
             console.print(f"[red]Error:[/] {exc}")
             continue
@@ -75,7 +76,11 @@ def chat() -> None:
         console.print(f"Session: {session_path}")
 
 
-def _run_task(task: str, prior_messages: list[dict[str, Any]] | None) -> tuple[AgentResult, Path]:
+def _run_task(
+    task: str,
+    prior_messages: list[dict[str, Any]] | None,
+    mode: str,
+) -> tuple[AgentResult, Path]:
     config = load_config(Path.cwd())
     sandbox = WorkspaceSandbox(config.workspace.root)
     policy = CommandPolicy(allow=config.commands.allow, deny=config.commands.deny)
@@ -86,8 +91,23 @@ def _run_task(task: str, prior_messages: list[dict[str, Any]] | None) -> tuple[A
         api_key=config.model.api_key,
         model=config.model.model,
     )
-    agent = AgentLoop(client=client, tools=tools, max_steps=config.agent.max_steps)
-    result = agent.run(task, prior_messages=prior_messages)
+    context_options = WorkspaceContextOptions(
+        doc_max_chars=config.context.doc_max_chars,
+        tree_max_entries=config.context.tree_max_entries,
+        include_project_docs=config.context.include_project_docs,
+        include_file_tree=config.context.include_file_tree,
+        include_git_status=config.context.include_git_status,
+        include_recent_commits=config.context.include_recent_commits,
+    )
+    agent = AgentLoop(
+        client=client,
+        tools=tools,
+        max_steps=config.agent.max_steps,
+        cwd=sandbox.root,
+        context_options=context_options,
+        recent_message_tokens=config.context.recent_message_tokens,
+    )
+    result = agent.run(task, prior_messages=prior_messages, mode=mode)
     session_path = SessionStore(config.project_root).save(result.messages)
     return result, session_path
 

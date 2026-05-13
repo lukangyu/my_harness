@@ -4,6 +4,7 @@ from pathlib import Path
 import httpx
 
 from coding_agent.agent import AgentLoop
+from coding_agent.context import WorkspaceContextOptions
 from coding_agent.llm import LLMError, OpenAICompatibleClient
 from coding_agent.policy import CommandPolicy
 from coding_agent.sandbox import WorkspaceSandbox
@@ -26,6 +27,14 @@ def make_tools(tmp_path):
     sandbox = WorkspaceSandbox(tmp_path)
     shell = ShellRunner(CommandPolicy(allow=[], deny=[]), cwd=tmp_path)
     return create_default_tools(sandbox, shell)
+
+
+def context_options():
+    return WorkspaceContextOptions(
+        include_file_tree=False,
+        include_git_status=False,
+        include_recent_commits=False,
+    )
 
 
 def tool_call(name, arguments, call_id="call_1"):
@@ -54,7 +63,13 @@ def test_agent_runs_tool_then_returns_final_answer(tmp_path):
             {"message": {"role": "assistant", "content": "done"}},
         ]
     )
-    agent = AgentLoop(client, make_tools(tmp_path), max_steps=3)
+    agent = AgentLoop(
+        client,
+        make_tools(tmp_path),
+        max_steps=3,
+        cwd=tmp_path,
+        context_options=context_options(),
+    )
 
     result = agent.run("write a note")
 
@@ -62,7 +77,13 @@ def test_agent_runs_tool_then_returns_final_answer(tmp_path):
     assert result.reached_max_steps is False
     assert (tmp_path / "notes.txt").read_text(encoding="utf-8") == "hello"
     assert client.calls[0]["messages"][0]["role"] == "system"
-    assert client.calls[0]["messages"][1] == {"role": "user", "content": "write a note"}
+    assert "<coding_agent_prefix" in client.calls[0]["messages"][0]["content"]
+    assert client.calls[0]["messages"][1]["role"] == "user"
+    assert "<workspace_context>" in client.calls[0]["messages"][1]["content"]
+    assert client.calls[0]["messages"][2]["role"] == "user"
+    assert "<current_task>" in client.calls[0]["messages"][2]["content"]
+    assert "mode: run" in client.calls[0]["messages"][2]["content"]
+    assert "write a note" in client.calls[0]["messages"][2]["content"]
     assert client.calls[1]["messages"][-1]["role"] == "tool"
     assert client.calls[1]["messages"][-1]["tool_call_id"] == "call_1"
     assert client.calls[1]["messages"][-1]["name"] == "write_file"
@@ -85,7 +106,13 @@ def test_agent_reports_invalid_json_tool_arguments(tmp_path):
             {"message": {"role": "assistant", "content": "fixed"}},
         ]
     )
-    agent = AgentLoop(client, make_tools(tmp_path), max_steps=3)
+    agent = AgentLoop(
+        client,
+        make_tools(tmp_path),
+        max_steps=3,
+        cwd=tmp_path,
+        context_options=context_options(),
+    )
 
     result = agent.run("write a note")
 
@@ -108,7 +135,13 @@ def test_agent_stops_after_max_steps(tmp_path):
             }
         ]
     )
-    agent = AgentLoop(client, make_tools(tmp_path), max_steps=1)
+    agent = AgentLoop(
+        client,
+        make_tools(tmp_path),
+        max_steps=1,
+        cwd=tmp_path,
+        context_options=context_options(),
+    )
 
     result = agent.run("inspect files")
 
@@ -116,29 +149,55 @@ def test_agent_stops_after_max_steps(tmp_path):
     assert "max steps" in result.final_answer.lower()
 
 
-def test_agent_continues_prior_messages_without_system_prompt(tmp_path):
+def test_agent_places_prior_messages_after_workspace_context(tmp_path):
     client = FakeClient([{"message": {"role": "assistant", "content": "answer"}}])
-    agent = AgentLoop(client, make_tools(tmp_path), max_steps=1)
+    agent = AgentLoop(
+        client,
+        make_tools(tmp_path),
+        max_steps=1,
+        cwd=tmp_path,
+        context_options=context_options(),
+    )
     prior_messages = [{"role": "user", "content": "earlier"}]
 
     result = agent.run("new task", prior_messages=prior_messages)
 
     assert result.final_answer == "answer"
-    assert client.calls[0]["messages"] == [
-        {"role": "user", "content": "earlier"},
-        {"role": "user", "content": "new task"},
-    ]
+    messages = client.calls[0]["messages"]
+    assert messages[0]["role"] == "system"
+    assert "<coding_agent_prefix" in messages[0]["content"]
+    assert messages[1]["role"] == "user"
+    assert "<workspace_context>" in messages[1]["content"]
+    assert messages[2] == {"role": "user", "content": "earlier"}
+    assert messages[3]["role"] == "user"
+    assert "<current_task>" in messages[3]["content"]
+    assert "new task" in messages[3]["content"]
 
 
-def test_agent_adds_system_prompt_for_empty_prior_messages(tmp_path):
+def test_agent_includes_workspace_context_for_empty_prior_messages(tmp_path):
+    (tmp_path / "README.md").write_text("hello workspace", encoding="utf-8")
     client = FakeClient([{"message": {"role": "assistant", "content": "answer"}}])
-    agent = AgentLoop(client, make_tools(tmp_path), max_steps=1)
+    agent = AgentLoop(
+        client,
+        make_tools(tmp_path),
+        max_steps=1,
+        cwd=tmp_path,
+        context_options=context_options(),
+    )
 
     result = agent.run("new task", prior_messages=[])
 
     assert result.final_answer == "answer"
     assert client.calls[0]["messages"][0]["role"] == "system"
-    assert client.calls[0]["messages"][1] == {"role": "user", "content": "new task"}
+    assert "<coding_agent_prefix" in client.calls[0]["messages"][0]["content"]
+    assert client.calls[0]["messages"][1]["role"] == "user"
+    assert "<workspace_context>" in client.calls[0]["messages"][1]["content"]
+    assert "README.md" in client.calls[0]["messages"][1]["content"]
+    assert "hello workspace" in client.calls[0]["messages"][1]["content"]
+    assert client.calls[0]["messages"][2]["role"] == "user"
+    assert "<current_task>" in client.calls[0]["messages"][2]["content"]
+    assert "mode: run" in client.calls[0]["messages"][2]["content"]
+    assert "new task" in client.calls[0]["messages"][2]["content"]
 
 
 def test_llm_client_posts_openai_compatible_chat_request(monkeypatch):

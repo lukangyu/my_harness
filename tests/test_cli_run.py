@@ -20,8 +20,10 @@ def test_run_without_api_key_prints_error_and_exits(tmp_path, monkeypatch):
 
 def test_chat_reports_task_error_and_continues(monkeypatch):
     runner = CliRunner()
+    calls = []
 
-    def fail_task(task, prior_messages):
+    def fail_task(task, prior_messages, mode):
+        calls.append({"task": task, "prior_messages": prior_messages, "mode": mode})
         raise ConfigError("missing config")
 
     monkeypatch.setattr(cli_module, "_run_task", fail_task)
@@ -31,3 +33,4 @@ def test_chat_reports_task_error_and_continues(monkeypatch):
     assert result.exit_code == 0
     assert "missing config" in result.output
     assert "Messages: 0" in result.output
+    assert calls == [{"task": "hello", "prior_messages": [], "mode": "chat"}]
