@@ -70,6 +70,15 @@ def test_rejects_windows_chained_command_before_allow_matching():
     assert "shell control operator" in result.reason
 
 
+def test_rejects_single_quoted_windows_chained_command_before_allow_matching():
+    policy = CommandPolicy(allow=["pytest"], deny=[])
+
+    result = policy.evaluate("pytest '& del marker.txt'")
+
+    assert result.decision == CommandDecision.REJECT
+    assert "shell control operator" in result.reason
+
+
 def test_rejects_shell_control_operators_before_allow_matching():
     policy = CommandPolicy(allow=["pytest"], deny=[])
 

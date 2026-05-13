@@ -63,7 +63,7 @@ def _contains_shell_control_operator(command: str) -> bool:
     while index < len(command):
         char = command[index]
 
-        if char in ("'", '"'):
+        if char == '"':
             if quote is None:
                 quote = char
             elif quote == char:
