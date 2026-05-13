@@ -32,6 +32,9 @@ class CommandPolicy:
             if _matches_rule(normalized_command, rule):
                 return PolicyResult(CommandDecision.DENY, f"Command denied by rule: {rule}")
 
+        if _contains_shell_control_operator(command):
+            return PolicyResult(CommandDecision.REJECT, "Command contains shell control operator")
+
         for rule in self.allow:
             if _matches_rule(normalized_command, rule):
                 return PolicyResult(CommandDecision.ALLOW, f"Command allowed by rule: {rule}")
@@ -49,3 +52,28 @@ def _normalize(value: str) -> str:
 
 def _matches_rule(command: str, rule: str) -> bool:
     return command == rule or command.startswith(f"{rule} ")
+
+
+def _contains_shell_control_operator(command: str) -> bool:
+    if "\n" in command or "\r" in command:
+        return True
+
+    quote: str | None = None
+    index = 0
+    while index < len(command):
+        char = command[index]
+
+        if char in ("'", '"'):
+            if quote is None:
+                quote = char
+            elif quote == char:
+                quote = None
+        elif quote is None:
+            if command.startswith(("&&", "||"), index):
+                return True
+            if char in (";", "&", "|"):
+                return True
+
+        index += 1
+
+    return False

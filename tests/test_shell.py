@@ -46,6 +46,18 @@ def test_denied_command_is_not_executed(tmp_path):
     assert not marker.exists()
 
 
+def test_rejects_chained_command_without_executing_second_segment(tmp_path):
+    marker = tmp_path / "marker.txt"
+    runner = ShellRunner(CommandPolicy(allow=["pytest"], deny=["del marker.txt"]), cwd=tmp_path)
+
+    result = runner.run("pytest & del marker.txt")
+
+    assert result.allowed is False
+    assert result.exit_code is None
+    assert "shell control operator" in result.stderr
+    assert not marker.exists()
+
+
 def test_timeout_returns_timed_out_result(tmp_path):
     runner = ShellRunner(CommandPolicy(allow=[sys.executable], deny=[]), cwd=tmp_path, timeout_seconds=0.1)
 
