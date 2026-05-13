@@ -222,9 +222,7 @@ class MessageBudget:
                 continue
             tokens = sum(self._message_tokens(message) for message in group)
             if used_tokens + tokens > self.recent_message_tokens:
-                if selected_groups:
-                    break
-                continue
+                break
             selected_groups.append(group)
             used_tokens += tokens
         selected_groups.reverse()
