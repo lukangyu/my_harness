@@ -97,9 +97,13 @@ class UsageStats:
             return None
 
         prompt_tokens_details = _usage_value(usage, "prompt_tokens_details")
-        cached_tokens = _usage_value(usage, "cached_tokens")
+        direct_cached_tokens = _usage_value(usage, "cached_tokens")
+        cached_tokens = direct_cached_tokens if isinstance(direct_cached_tokens, int) else None
         if cached_tokens is None and prompt_tokens_details is not None:
-            cached_tokens = _usage_value(prompt_tokens_details, "cached_tokens")
+            detail_cached_tokens = _usage_value(prompt_tokens_details, "cached_tokens")
+            cached_tokens = (
+                detail_cached_tokens if isinstance(detail_cached_tokens, int) else None
+            )
 
         return cls(
             input_tokens=_first_usage_value(usage, "prompt_tokens", "input_tokens"),
@@ -570,7 +574,7 @@ def _hash_json(value: Any) -> str:
     ).hexdigest()
 
 
-def _usage_value(usage: Any, key: str) -> int | dict[str, Any] | None:
+def _usage_value(usage: Any, key: str) -> Any:
     if isinstance(usage, dict):
         value = usage.get(key)
     else:
@@ -582,6 +586,8 @@ def _usage_value(usage: Any, key: str) -> int | dict[str, Any] | None:
     if isinstance(value, int):
         return value
     if isinstance(value, dict):
+        return value
+    if hasattr(value, "__dict__"):
         return value
     return None
 

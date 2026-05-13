@@ -31,6 +31,21 @@ def test_usage_stats_parses_openai_cached_tokens():
     assert stats.cache_hit_ratio == 0.85
 
 
+def test_usage_stats_parses_nested_attribute_cached_tokens():
+    class PromptTokenDetails:
+        cached_tokens = 85
+
+    class ResponseUsage:
+        prompt_tokens = 100
+        completion_tokens = 25
+        prompt_tokens_details = PromptTokenDetails()
+
+    stats = UsageStats.from_response_usage(ResponseUsage())
+
+    assert stats == UsageStats(input_tokens=100, output_tokens=25, cached_tokens=85)
+    assert stats.cache_hit_ratio == 0.85
+
+
 def test_usage_stats_parses_generic_input_output_shape():
     stats = UsageStats.from_response_usage(
         {"input_tokens": 50, "output_tokens": 10, "cached_tokens": 20}

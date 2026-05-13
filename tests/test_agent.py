@@ -119,6 +119,42 @@ def test_agent_runs_tool_then_returns_final_answer(tmp_path):
     ]
 
 
+def test_agent_preserves_previous_usage_when_final_response_has_no_usage(tmp_path):
+    first_usage = UsageStats(input_tokens=100, output_tokens=5, cached_tokens=40)
+    client = FakeClient(
+        [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        tool_call(
+                            "write_file",
+                            json.dumps({"path": "notes.txt", "content": "hello"}),
+                        )
+                    ],
+                },
+                "usage": first_usage,
+            },
+            {
+                "message": {"role": "assistant", "content": "done"},
+            },
+        ]
+    )
+    agent = AgentLoop(
+        client,
+        make_tools(tmp_path),
+        max_steps=3,
+        cwd=tmp_path,
+        context_options=context_options(),
+    )
+
+    result = agent.run("write a note")
+
+    assert result.final_answer == "done"
+    assert result.usage == first_usage
+
+
 def test_agent_reports_invalid_json_tool_arguments(tmp_path):
     client = FakeClient(
         [

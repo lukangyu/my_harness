@@ -69,7 +69,9 @@ class AgentLoop:
 
         for _ in range(self.max_steps):
             response = self.client.chat(messages, tool_schemas)
-            usage = response.get("usage")
+            response_usage = response.get("usage")
+            if response_usage is not None:
+                usage = response_usage
             assistant_message = response["message"]
             messages.append(assistant_message)
             conversation_messages.append(deepcopy(assistant_message))
