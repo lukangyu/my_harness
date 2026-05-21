@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 from typing import Any, Optional
 
@@ -8,6 +9,7 @@ from rich.markdown import Markdown
 
 from coding_agent.application import Application
 from coding_agent.config import ConfigError, load_config
+from coding_agent.interrupts import TaskInterrupted
 from coding_agent.llm import LLMError
 from coding_agent.run_result import RunTaskResult
 from coding_agent.runtime_events import RuntimeEvent
@@ -35,6 +37,9 @@ def run(task: str) -> None:
     """Run one coding task and exit."""
     try:
         task_result = _run_task(task, None, mode="run")
+    except TaskInterrupted as exc:
+        console.print(f"[yellow]Task interrupted:[/] {exc or 'user interrupted'}")
+        raise typer.Exit(130) from exc
     except (ConfigError, LLMError) as exc:
         console.print(f"[red]Error:[/] {exc}")
         raise typer.Exit(1) from exc
@@ -73,6 +78,9 @@ def chat(
 
         try:
             task_result = _run_task(command, messages, mode="chat")
+        except TaskInterrupted as exc:
+            console.print(f"[yellow]Task interrupted:[/] {exc or 'user interrupted'}")
+            continue
         except (ConfigError, LLMError) as exc:
             console.print(f"[red]Error:[/] {exc}")
             continue
@@ -203,14 +211,51 @@ def _make_runtime_event_printer(state: dict[str, bool] | None = None) -> Any:
     return on_runtime_event
 
 
-def _make_command_approval() -> Any:
+def _make_command_approval(read_key: Any | None = None) -> Any:
+    if read_key is None:
+        read_key = _read_approval_key
+
     def approve(command: str, reason: str) -> bool:
-        return typer.confirm(
-            f"Allow shell command? {command}\nReason: {reason}",
-            default=False,
+        console.print(
+            (
+                f"Allow shell command? {command}\n"
+                f"Reason: {reason}\n"
+                "Press y to allow, n to reject, Esc to interrupt current task."
+            ),
+            style="yellow",
+            markup=False,
         )
+        while True:
+            key = read_key()
+            normalized = key.lower()
+            if normalized == "y":
+                console.print("  command approved", style="yellow")
+                return True
+            if normalized == "n":
+                console.print("  command rejected", style="yellow")
+                return False
+            if key == "\x1b":
+                raise TaskInterrupted("user interrupted during shell approval")
 
     return approve
+
+
+def _read_approval_key() -> str:
+    if os.name == "nt":
+        import msvcrt
+
+        return msvcrt.getwch()
+    import sys
+    import termios
+    import tty
+
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        return sys.stdin.read(1)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
 
 def _print_tool_result_event(event: RuntimeEvent, state: dict[str, bool]) -> None:

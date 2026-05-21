@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from coding_agent.agent import AgentLoop
+from coding_agent.interrupts import TaskInterrupted
 from coding_agent.memory import MemoryStore
 from coding_agent.run_result import RunTaskResult
 from coding_agent.run_store import RunArtifact, RunStore, TaskState
@@ -95,6 +96,17 @@ class RunCoordinator:
                 },
             )
             return RunTaskResult(result, session_path, show_cache_stats, self.run_artifact.run_id, self.run_artifact.run_dir)
+        except TaskInterrupted:
+            self.task_state.status = "interrupted"
+            self.task_state.stop_reason = "user_interrupt"
+            self.run_store.write_task_state(self.run_artifact, self.task_state)
+            self.run_store.write_report(
+                self.run_artifact,
+                self.task_state,
+                session_path=None,
+                files_changed=_memory_modified_files(self.memory_store),
+            )
+            raise
         except Exception as exc:
             self.task_state.status = "failed"
             self.task_state.stop_reason = "error"

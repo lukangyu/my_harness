@@ -3,6 +3,7 @@ import json
 import pytest
 
 from coding_agent.agent import AgentResult
+from coding_agent.interrupts import TaskInterrupted
 from coding_agent.memory import MemoryStore
 from coding_agent.run_coordinator import RunCoordinator
 from coding_agent.run_store import RunStore
@@ -98,3 +99,25 @@ def test_run_coordinator_failure_writes_failed_state_and_report(tmp_path):
     assert task_state["error"] == "boom"
     assert report["session_path"] is None
     assert report["status"] == "failed"
+
+
+def test_run_coordinator_interruption_writes_interrupted_state_and_report(tmp_path):
+    coordinator, artifact = make_coordinator(tmp_path)
+    agent = FakeAgent(error=TaskInterrupted("user interrupted"))
+
+    with pytest.raises(TaskInterrupted):
+        coordinator.run(
+            agent=agent,
+            task="inspect",
+            prior_messages=[],
+            mode="run",
+            show_cache_stats=True,
+            workspace_root=tmp_path,
+        )
+
+    task_state = json.loads(artifact.task_state_path.read_text(encoding="utf-8"))
+    report = json.loads(artifact.report_path.read_text(encoding="utf-8"))
+    assert task_state["status"] == "interrupted"
+    assert task_state["stop_reason"] == "user_interrupt"
+    assert report["session_path"] is None
+    assert report["status"] == "interrupted"

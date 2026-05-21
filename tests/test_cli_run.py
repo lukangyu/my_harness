@@ -1,11 +1,13 @@
 from typer.testing import CliRunner
 from rich.console import Console
+import pytest
 
 import coding_agent.cli as cli_module
 from coding_agent.agent import AgentResult
 from coding_agent.cli import RunTaskResult, app
 from coding_agent.config import ConfigError
 from coding_agent.context import UsageStats
+from coding_agent.interrupts import TaskInterrupted
 from coding_agent.runtime_events import RuntimeEvent
 from coding_agent.session import SessionStore
 
@@ -65,6 +67,20 @@ def test_run_without_api_key_prints_error_and_exits(tmp_path, monkeypatch):
     assert "OPENAI_API_KEY" in result.output
 
 
+def test_run_interruption_exits_cleanly(monkeypatch):
+    runner = CliRunner()
+
+    def interrupt_task(task, prior_messages, mode):
+        raise TaskInterrupted("user interrupted")
+
+    monkeypatch.setattr(cli_module, "_run_task", interrupt_task)
+
+    result = runner.invoke(app, ["run", "inspect"])
+
+    assert result.exit_code == 130
+    assert "Task interrupted" in result.output
+
+
 def test_chat_reports_task_error_and_continues(monkeypatch):
     runner = CliRunner()
     calls = []
@@ -79,6 +95,24 @@ def test_chat_reports_task_error_and_continues(monkeypatch):
 
     assert result.exit_code == 0
     assert "missing config" in result.output
+    assert "Messages: 0" in result.output
+    assert calls == [{"task": "hello", "prior_messages": [], "mode": "chat"}]
+
+
+def test_chat_interruption_returns_to_prompt(monkeypatch):
+    runner = CliRunner()
+    calls = []
+
+    def interrupt_task(task, prior_messages, mode):
+        calls.append({"task": task, "prior_messages": prior_messages, "mode": mode})
+        raise TaskInterrupted("user interrupted")
+
+    monkeypatch.setattr(cli_module, "_run_task", interrupt_task)
+
+    result = runner.invoke(app, ["chat"], input="hello\n/status\n/exit\n")
+
+    assert result.exit_code == 0
+    assert "Task interrupted" in result.output
     assert "Messages: 0" in result.output
     assert calls == [{"task": "hello", "prior_messages": [], "mode": "chat"}]
 
@@ -349,23 +383,28 @@ def test_runtime_event_printer_renders_failed_tool_result(monkeypatch):
     assert "<- run_shell failed: Command not in allow list" in output
 
 
-def test_command_approval_asks_user(monkeypatch):
-    prompts = []
-
-    def fake_confirm(message, default):
-        prompts.append({"message": message, "default": default})
-        return True
-
-    monkeypatch.setattr(cli_module.typer, "confirm", fake_confirm)
-    approval = cli_module._make_command_approval()
+def test_command_approval_accepts_y(monkeypatch):
+    outputs = []
+    monkeypatch.setattr(cli_module.console, "print", lambda *args, **kwargs: outputs.append(args[0] if args else ""))
+    approval = cli_module._make_command_approval(read_key=lambda: "y")
 
     assert approval("git log --oneline -n 8", "Command not in allow list") is True
-    assert prompts == [
-        {
-            "message": "Allow shell command? git log --oneline -n 8\nReason: Command not in allow list",
-            "default": False,
-        }
-    ]
+    assert any("Allow shell command" in text for text in outputs)
+
+
+def test_command_approval_rejects_n(monkeypatch):
+    monkeypatch.setattr(cli_module.console, "print", lambda *args, **kwargs: None)
+    approval = cli_module._make_command_approval(read_key=lambda: "n")
+
+    assert approval("git log --oneline -n 8", "Command not in allow list") is False
+
+
+def test_command_approval_esc_interrupts_task(monkeypatch):
+    monkeypatch.setattr(cli_module.console, "print", lambda *args, **kwargs: None)
+    approval = cli_module._make_command_approval(read_key=lambda: "\x1b")
+
+    with pytest.raises(TaskInterrupted):
+        approval("git log --oneline -n 8", "Command not in allow list")
 
 
 def test_print_task_result_renders_markdown(monkeypatch):
