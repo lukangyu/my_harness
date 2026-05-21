@@ -1,4 +1,5 @@
 from typer.testing import CliRunner
+from rich.console import Console
 
 import coding_agent.cli as cli_module
 from coding_agent.agent import AgentResult
@@ -190,6 +191,93 @@ def test_run_prints_cache_stats_when_enabled_and_usage_has_ratio(monkeypatch):
     assert "Cache: 85% cached input tokens" in result.output
 
 
+def test_run_prints_reasoning_separately_from_final_answer(monkeypatch):
+    runner = CliRunner()
+
+    def run_task(task, prior_messages, mode):
+        return RunTaskResult(
+            AgentResult(
+                final_answer="final answer",
+                messages=[],
+                conversation_messages=[
+                    {
+                        "role": "assistant",
+                        "content": "final answer",
+                        "reasoning_content": "thinking text",
+                    }
+                ],
+                usage=UsageStats(input_tokens=100, output_tokens=10, cached_tokens=0),
+            ),
+            "session.json",
+            False,
+        )
+
+    monkeypatch.setattr(cli_module, "_run_task", run_task)
+
+    result = runner.invoke(app, ["run", "summarize"])
+
+    assert result.exit_code == 0
+    assert "thinking" in result.output
+    assert "thinking text" in result.output
+    assert "answer" in result.output
+    assert "final answer" in result.output
+
+
+def test_format_tool_call_renders_compact_summary():
+    rendered = cli_module._format_tool_call(
+        {
+            "function": {
+                "name": "read_file",
+                "arguments": '{"path":"src/coding_agent/agent.py"}',
+            }
+        }
+    )
+
+    assert rendered == "read_file(path='src/coding_agent/agent.py')"
+
+
+def test_tool_printer_renders_codex_style_event(monkeypatch):
+    buffer = Console(record=True, width=100)
+    monkeypatch.setattr(cli_module, "console", buffer)
+    printer = cli_module._make_tool_printer()
+
+    printer(
+        {
+            "function": {
+                "name": "read_file",
+                "arguments": '{"path":"README.md"}',
+            }
+        }
+    )
+
+    output = buffer.export_text()
+    assert "tools" in output
+    assert "-> read_file(path='README.md')" in output
+
+
+def test_print_task_result_renders_markdown(monkeypatch):
+    buffer = Console(record=True, width=100)
+    monkeypatch.setattr(cli_module, "console", buffer)
+    task_result = RunTaskResult(
+        AgentResult(
+            final_answer="**bold**\n\n- item",
+            messages=[],
+            conversation_messages=[],
+        ),
+        "session.json",
+        False,
+    )
+
+    cli_module._print_task_result(task_result)
+
+    output = buffer.export_text()
+    assert "answer" in output
+    assert "**bold**" not in output
+    assert "bold" in output
+    assert "item" in output
+    assert "status" in output
+
+
 def test_run_omits_cache_stats_when_disabled(monkeypatch):
     runner = CliRunner()
 
@@ -211,3 +299,17 @@ def test_run_omits_cache_stats_when_disabled(monkeypatch):
 
     assert result.exit_code == 0
     assert "Cache:" not in result.output
+
+
+def test_chat_resume_preserves_reasoning_content(tmp_path):
+    session_path = tmp_path / "session.json"
+    session_path.write_text(
+        '[{"role": "assistant", "content": "answer", "reasoning_content": "thinking"}]',
+        encoding="utf-8",
+    )
+
+    records = SessionStore.load(session_path)
+
+    assert records == [
+        {"role": "assistant", "content": "answer", "reasoning_content": "thinking"}
+    ]

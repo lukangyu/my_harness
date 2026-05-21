@@ -96,6 +96,7 @@ def test_agent_runs_tool_then_returns_final_answer(tmp_path):
     assert json.loads(client.calls[1]["messages"][-1]["content"]) == {
         "ok": True,
         "path": "notes.txt",
+        "metadata": {"written_chars": 5},
     }
     assert result.conversation_messages == [
         {"role": "user", "content": "write a note"},
@@ -113,7 +114,10 @@ def test_agent_runs_tool_then_returns_final_answer(tmp_path):
             "role": "tool",
             "tool_call_id": "call_1",
             "name": "write_file",
-            "content": json.dumps({"ok": True, "path": "notes.txt"}, ensure_ascii=False),
+            "content": json.dumps(
+                {"ok": True, "path": "notes.txt", "metadata": {"written_chars": 5}},
+                ensure_ascii=False,
+            ),
         },
         {"role": "assistant", "content": "done"},
     ]
@@ -183,6 +187,45 @@ def test_agent_reports_invalid_json_tool_arguments(tmp_path):
     assert result.final_answer == "fixed"
     assert tool_result["ok"] is False
     assert "invalid json" in tool_result["error"].lower()
+
+
+def test_agent_emits_tool_call_event_before_execution(tmp_path):
+    events = []
+    client = FakeClient(
+        [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        tool_call(
+                            "write_file",
+                            json.dumps({"path": "notes.txt", "content": "hello"}),
+                        )
+                    ],
+                }
+            },
+            {"message": {"role": "assistant", "content": "done"}},
+        ]
+    )
+    agent = AgentLoop(
+        client,
+        make_tools(tmp_path),
+        max_steps=3,
+        cwd=tmp_path,
+        context_options=context_options(),
+        on_tool_call=events.append,
+    )
+
+    result = agent.run("write a note")
+
+    assert result.final_answer == "done"
+    assert events == [
+        tool_call(
+            "write_file",
+            json.dumps({"path": "notes.txt", "content": "hello"}),
+        )
+    ]
 
 
 def test_agent_stops_after_max_steps(tmp_path):
@@ -367,12 +410,208 @@ def test_llm_client_posts_openai_compatible_chat_request(monkeypatch):
             "json": {
                 "model": "model-a",
                 "messages": [{"role": "user", "content": "hi"}],
+                "stream": False,
                 "tools": [{"type": "function"}],
                 "tool_choice": "auto",
             },
             "timeout": 12.5,
         }
     ]
+
+
+def test_llm_client_writes_debug_log_for_chat_request(monkeypatch, tmp_path):
+    def fake_post(url, *, headers, json, timeout):
+        return httpx.Response(
+            200,
+            request=httpx.Request("POST", url),
+            json={
+                "choices": [{"message": {"role": "assistant", "content": "hello"}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    client = OpenAICompatibleClient(
+        "https://example.test/v1/",
+        "secret",
+        "model-a",
+        debug_dir=tmp_path,
+    )
+
+    client.chat([{"role": "user", "content": "hi"}], [])
+
+    logs = list(tmp_path.glob("*.json"))
+    assert len(logs) == 1
+    record = json.loads(logs[0].read_text(encoding="utf-8"))
+    assert record["request"]["url"] == "https://example.test/v1/chat/completions"
+    assert record["request"]["payload"] == {
+        "model": "model-a",
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": False,
+    }
+    assert record["response"]["json"]["choices"][0]["message"]["content"] == "hello"
+    assert record["response"]["parsed"]["message"]["content"] == "hello"
+    assert "secret" not in logs[0].read_text(encoding="utf-8")
+    assert "Authorization" not in logs[0].read_text(encoding="utf-8")
+
+
+def test_llm_client_streams_openai_compatible_chat_request(monkeypatch):
+    requests = []
+
+    class FakeStreamResponse:
+        def __init__(self, url):
+            self.url = url
+            self.status_checked = False
+
+        def raise_for_status(self):
+            self.status_checked = True
+
+        def iter_lines(self):
+            return iter(
+                [
+                    'data: {"choices":[{"delta":{"role":"assistant","reasoning_content":"thinking "}}]}',
+                    'data: {"choices":[{"delta":{"content":"hel"}}]}',
+                    'data: {"choices":[{"delta":{"content":"lo"}}]}',
+                    "data: [DONE]",
+                ]
+            )
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_stream(method, url, *, headers, json, timeout):
+        requests.append(
+            {
+                "method": method,
+                "url": url,
+                "headers": headers,
+                "json": json,
+                "timeout": timeout,
+            }
+        )
+        return FakeStreamResponse(url)
+
+    monkeypatch.setattr(httpx, "stream", fake_stream)
+    client = OpenAICompatibleClient(
+        "https://example.test/v1/",
+        "secret",
+        "model-a",
+        timeout=12.5,
+        stream=True,
+    )
+
+    result = client.chat([{"role": "user", "content": "hi"}], [{"type": "function"}])
+
+    assert result == {
+        "message": {"role": "assistant", "content": "hello", "reasoning_content": "thinking "},
+        "usage": None,
+    }
+    assert requests == [
+        {
+            "method": "POST",
+            "url": "https://example.test/v1/chat/completions",
+            "headers": {"Authorization": "Bearer secret"},
+            "json": {
+                "model": "model-a",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": True,
+                "tools": [{"type": "function"}],
+                "tool_choice": "auto",
+            },
+            "timeout": 12.5,
+        }
+    ]
+
+
+def test_llm_client_preserves_reasoning_content_when_stream_has_no_content(monkeypatch):
+    class FakeStreamResponse:
+        def raise_for_status(self):
+            pass
+
+        def iter_lines(self):
+            return iter(
+                [
+                    'data: {"choices":[{"delta":{"role":"assistant","content":null,"reasoning_content":"分析"}}]}',
+                    'data: {"choices":[{"delta":{"content":null,"reasoning_content":"一下项目"}}]}',
+                    "data: [DONE]",
+                ]
+            )
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(httpx, "stream", lambda *args, **kwargs: FakeStreamResponse())
+    client = OpenAICompatibleClient(
+        "https://example.test/v1/",
+        "secret",
+        "model-a",
+        timeout=12.5,
+        stream=True,
+    )
+
+    result = client.chat([{"role": "user", "content": "hi"}], [])
+
+    assert result == {
+        "message": {"role": "assistant", "content": "", "reasoning_content": "分析一下项目"},
+        "usage": None,
+    }
+
+
+def test_llm_client_accumulates_streamed_tool_calls(monkeypatch):
+    class FakeStreamResponse:
+        def raise_for_status(self):
+            pass
+
+        def iter_lines(self):
+            return iter(
+                [
+                    'data: {"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":""}}]}}]}',
+                    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"path\\":\\"README.md\\"}"}}]}}]}',
+                    'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+                    "data: [DONE]",
+                ]
+            )
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(httpx, "stream", lambda *args, **kwargs: FakeStreamResponse())
+    client = OpenAICompatibleClient(
+        "https://example.test/v1/",
+        "secret",
+        "model-a",
+        timeout=12.5,
+        stream=True,
+    )
+
+    result = client.chat([{"role": "user", "content": "hi"}], [])
+
+    assert result == {
+        "message": {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": '{"path":"README.md"}',
+                    },
+                }
+            ],
+        },
+        "usage": None,
+    }
 
 
 def test_llm_client_raises_llm_error_for_httpx_errors(monkeypatch):

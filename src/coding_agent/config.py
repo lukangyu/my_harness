@@ -50,6 +50,13 @@ class ContextConfig:
     include_recent_commits: bool = True
     restore_last_session: bool = False
     show_cache_stats: bool = True
+    compact_threshold_ratio: float = 0.8
+    protected_recent_turns: int = 4
+    protected_tool_results: int = 6
+    handoff_max_chars: int = 6000
+    scratchpad_max_chars: int = 4000
+    file_summaries_max_count: int = 8
+    file_summaries_max_chars: int = 8000
 
 
 @dataclass(frozen=True)
@@ -164,6 +171,48 @@ def load_config(project_root: Path) -> AppConfig:
             context_defaults.show_cache_stats,
             "context.show_cache_stats",
         ),
+        compact_threshold_ratio=_optional_float(
+            context_data,
+            "compact_threshold_ratio",
+            context_defaults.compact_threshold_ratio,
+            "context.compact_threshold_ratio",
+        ),
+        protected_recent_turns=_optional_int(
+            context_data,
+            "protected_recent_turns",
+            context_defaults.protected_recent_turns,
+            "context.protected_recent_turns",
+        ),
+        protected_tool_results=_optional_int(
+            context_data,
+            "protected_tool_results",
+            context_defaults.protected_tool_results,
+            "context.protected_tool_results",
+        ),
+        handoff_max_chars=_optional_int(
+            context_data,
+            "handoff_max_chars",
+            context_defaults.handoff_max_chars,
+            "context.handoff_max_chars",
+        ),
+        scratchpad_max_chars=_optional_int(
+            context_data,
+            "scratchpad_max_chars",
+            context_defaults.scratchpad_max_chars,
+            "context.scratchpad_max_chars",
+        ),
+        file_summaries_max_count=_optional_int(
+            context_data,
+            "file_summaries_max_count",
+            context_defaults.file_summaries_max_count,
+            "context.file_summaries_max_count",
+        ),
+        file_summaries_max_chars=_optional_int(
+            context_data,
+            "file_summaries_max_chars",
+            context_defaults.file_summaries_max_chars,
+            "context.file_summaries_max_chars",
+        ),
     )
 
     return AppConfig(
@@ -231,6 +280,15 @@ def _optional_int(data: dict[str, Any], key: str, default: int, display_key: str
     if not isinstance(value, int) or isinstance(value, bool):
         raise ConfigError(f"Configuration key {display_key} must be an integer")
     return value
+
+
+def _optional_float(data: dict[str, Any], key: str, default: float, display_key: str) -> float:
+    if key not in data:
+        return default
+    value = data[key]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigError(f"Configuration key {display_key} must be a number")
+    return float(value)
 
 
 def _required_bool(data: dict[str, Any], key: str, display_key: str) -> bool:

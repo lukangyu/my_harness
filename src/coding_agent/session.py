@@ -5,6 +5,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from coding_agent.telemetry import TelemetryLogger
+
 _ALLOWED_ROLES = {"user", "assistant", "tool"}
 _GENERATED_PROMPT_MARKERS = (
     "<coding_agent_prefix",
@@ -14,14 +16,31 @@ _GENERATED_PROMPT_MARKERS = (
 
 
 class SessionStore:
-    def __init__(self, project_root: Path | str) -> None:
+    def __init__(self, project_root: Path | str, telemetry: TelemetryLogger | None = None) -> None:
         self.project_root = Path(project_root)
         self.sessions_dir = self.project_root / ".coding-agent" / "sessions"
+        self.telemetry = telemetry
 
     def save(self, records: list[dict[str, Any]]) -> Path:
+        if self.telemetry is not None:
+            self.telemetry.event(
+                "session.save.start",
+                "开始保存会话记录",
+                function="SessionStore.save",
+                phase="session",
+                metadata={"record_count": len(records)},
+            )
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         path = self.sessions_dir / f"{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}.json"
         path.write_text(json.dumps(records, indent=2, ensure_ascii=False), encoding="utf-8")
+        if self.telemetry is not None:
+            self.telemetry.event(
+                "session.save.end",
+                "会话记录已保存",
+                function="SessionStore.save",
+                phase="session",
+                metadata={"path": str(path), "record_count": len(records)},
+            )
         return path
 
     @staticmethod
@@ -31,19 +50,55 @@ class SessionStore:
             raise ValueError("Session JSON root must be a list")
         return [_validate_session_record(record, index) for index, record in enumerate(records)]
 
+    def load_with_telemetry(self, path: Path | str) -> list[dict[str, Any]]:
+        if self.telemetry is not None:
+            self.telemetry.event(
+                "session.load.start",
+                "开始加载会话记录",
+                function="SessionStore.load_with_telemetry",
+                phase="session",
+                metadata={"path": str(path)},
+            )
+        records = self.load(path)
+        if self.telemetry is not None:
+            self.telemetry.event(
+                "session.load.end",
+                "会话记录加载完成",
+                function="SessionStore.load_with_telemetry",
+                phase="session",
+                metadata={"path": str(path), "record_count": len(records)},
+            )
+        return records
+
     def latest(self) -> Path | None:
+        if self.telemetry is not None:
+            self.telemetry.event(
+                "session.latest.start",
+                "开始查找最近的会话记录",
+                function="SessionStore.latest",
+                phase="session",
+            )
         if not self.sessions_dir.exists():
             return None
         sessions = list(self.sessions_dir.glob("*.json"))
         if not sessions:
             return None
-        return max(sessions, key=lambda path: (path.stat().st_mtime_ns, path.name))
+        latest = max(sessions, key=lambda path: (path.stat().st_mtime_ns, path.name))
+        if self.telemetry is not None:
+            self.telemetry.event(
+                "session.latest.end",
+                "最近的会话记录查找完成",
+                function="SessionStore.latest",
+                phase="session",
+                metadata={"path": str(latest)},
+            )
+        return latest
 
     def load_latest(self) -> list[dict[str, Any]] | None:
         path = self.latest()
         if path is None:
             return None
-        return self.load(path)
+        return self.load_with_telemetry(path)
 
 
 def _validate_session_record(record: Any, index: int) -> dict[str, Any]:
@@ -64,7 +119,12 @@ def _validate_session_record(record: Any, index: int) -> dict[str, Any]:
         raise ValueError(f"Session record {index} content must be a string")
     if role == "assistant" and content is not None and not isinstance(content, str):
         raise ValueError(f"Session record {index} content must be a string or null")
+    reasoning_content = record.get("reasoning_content")
+    if role == "assistant" and reasoning_content is not None and not isinstance(reasoning_content, str):
+        raise ValueError(f"Session record {index} reasoning_content must be a string or null")
     if isinstance(content, str) and any(marker in content for marker in _GENERATED_PROMPT_MARKERS):
+        raise ValueError(f"Session record {index} contains generated prompt block")
+    if isinstance(reasoning_content, str) and any(marker in reasoning_content for marker in _GENERATED_PROMPT_MARKERS):
         raise ValueError(f"Session record {index} contains generated prompt block")
 
     normalized = dict(record)

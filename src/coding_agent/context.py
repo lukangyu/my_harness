@@ -8,7 +8,9 @@ import subprocess
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
+
+from coding_agent.memory import MemoryStore
 
 
 DOC_NAMES = (
@@ -60,7 +62,7 @@ You are coding-agent, a local AI coding assistant.
 - Use list_files/read_file/search_text to inspect.
 - Use write_file only for intentional file writes.
 - run_shell may be rejected by policy.
-- apply_patch is currently unsupported.
+- Use apply_patch for focused workspace file edits when possible.
 </tool_contract>
 
 <response_contract>
@@ -77,6 +79,19 @@ class WorkspaceContextOptions:
     include_file_tree: bool = True
     include_git_status: bool = True
     include_recent_commits: bool = True
+    max_input_tokens: int = 24000
+    compact_threshold_ratio: float = 0.8
+    protected_recent_turns: int = 4
+    protected_tool_results: int = 6
+    handoff_max_chars: int = 6000
+    scratchpad_max_chars: int = 4000
+    file_summaries_max_count: int = 8
+    file_summaries_max_chars: int = 8000
+
+
+class CompactClient(Protocol):
+    def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[str, Any]:
+        ...
 
 
 @dataclass(frozen=True)
@@ -228,6 +243,9 @@ class ContextEnvelope:
     recent_messages: list[dict[str, Any]]
     current_task: str
     full_context_key: str
+    memory_anchor: str = ""
+    handoff_memo: str = ""
+    file_summaries: str = ""
 
 
 def estimate_tokens(text: str) -> int:
@@ -341,9 +359,13 @@ class ContextManager:
         cwd: Path,
         options: WorkspaceContextOptions,
         recent_message_tokens: int,
+        memory_store: MemoryStore | None = None,
+        compact_client: CompactClient | None = None,
     ) -> None:
         self.cwd = cwd
         self.options = options
+        self.memory_store = memory_store
+        self.compact_client = compact_client
         self.stable_prefix_manager = StablePrefixManager()
         self.workspace_prefix_manager = WorkspacePrefixManager()
         self.message_budget = MessageBudget(recent_message_tokens)
@@ -358,12 +380,28 @@ class ContextManager:
         stable_prefix = self.stable_prefix_manager.get_or_build(tool_schemas)
         workspace_context = WorkspaceContext.build(self.cwd, self.options)
         workspace_prefix = self.workspace_prefix_manager.get_or_build(workspace_context)
-        recent_messages = self.message_budget.trim_recent_messages(prior_messages)
+        memory_anchor = self._memory_anchor()
+        file_summaries = self._file_summaries()
+        handoff_memo = self._handoff_memo()
+        compacted_prior_messages, handoff_memo = self._compact_if_needed(
+            prior_messages=list(prior_messages),
+            stable_prefix=stable_prefix,
+            workspace_prefix=workspace_prefix,
+            memory_anchor=memory_anchor,
+            file_summaries=file_summaries,
+            handoff_memo=handoff_memo,
+            task=task,
+            mode=mode,
+        )
+        recent_messages = self.message_budget.trim_recent_messages(compacted_prior_messages)
         current_task = str(task)
         full_context_key = _hash_json(
             {
                 "stable_prompt_key": stable_prefix.prompt_cache_key,
                 "workspace_fingerprint": workspace_prefix.workspace_fingerprint,
+                "memory_hash": _hash_text(memory_anchor),
+                "file_summaries_hash": _hash_text(file_summaries),
+                "handoff_hash": _hash_text(handoff_memo),
                 "recent_hash": _hash_json(recent_messages),
                 "task_hash": _hash_text(current_task),
                 "mode": mode,
@@ -373,11 +411,118 @@ class ContextManager:
             stable_prefix=stable_prefix,
             workspace_prefix=workspace_prefix,
             mode=mode,
+            memory_anchor=memory_anchor,
+            handoff_memo=handoff_memo,
+            file_summaries=file_summaries,
             session_summary=None,
             recent_messages=recent_messages,
             current_task=current_task,
             full_context_key=full_context_key,
         )
+
+    def _memory_anchor(self) -> str:
+        if self.memory_store is None:
+            return ""
+        return self.memory_store.render_memory_anchor(max_chars=self.options.scratchpad_max_chars)
+
+    def _handoff_memo(self) -> str:
+        if self.memory_store is None:
+            return ""
+        handoff = self.memory_store.read_handoff()
+        if len(handoff) > self.options.handoff_max_chars:
+            return handoff[: self.options.handoff_max_chars] + "\n... [handoff_memo truncated]"
+        return handoff
+
+    def _file_summaries(self) -> str:
+        if self.memory_store is None:
+            return ""
+        return self.memory_store.render_file_summaries(
+            candidate_paths=self.memory_store.candidate_summary_paths(),
+            max_count=self.options.file_summaries_max_count,
+            max_chars=self.options.file_summaries_max_chars,
+        )
+
+    def _compact_if_needed(
+        self,
+        *,
+        prior_messages: list[dict[str, Any]],
+        stable_prefix: StablePrefixState,
+        workspace_prefix: WorkspacePrefixState,
+        memory_anchor: str,
+        file_summaries: str,
+        handoff_memo: str,
+        task: str,
+        mode: str,
+    ) -> tuple[list[dict[str, Any]], str]:
+        if self.memory_store is None or self.compact_client is None or not prior_messages:
+            return prior_messages, handoff_memo
+        estimated_tokens = self._estimate_context_tokens(
+            stable_prefix=stable_prefix,
+            workspace_prefix=workspace_prefix,
+            memory_anchor=memory_anchor,
+            file_summaries=file_summaries,
+            handoff_memo=handoff_memo,
+            prior_messages=prior_messages,
+            task=task,
+            mode=mode,
+        )
+        threshold = int(self.options.max_input_tokens * self.options.compact_threshold_ratio)
+        if estimated_tokens < threshold:
+            return prior_messages, handoff_memo
+
+        protected = protect_recent_messages(
+            prior_messages,
+            protected_recent_turns=self.options.protected_recent_turns,
+            protected_tool_results=self.options.protected_tool_results,
+        )
+        old_count = max(0, len(prior_messages) - len(protected))
+        compact_prompt = build_handoff_prompt(
+            old_messages=prior_messages[:old_count],
+            previous_handoff=handoff_memo,
+            memory_anchor=memory_anchor,
+        )
+        response = self.compact_client.chat(
+            [
+                {"role": "system", "content": "你是上下文压缩器，只输出交接备忘录。"},
+                {"role": "user", "content": compact_prompt},
+            ],
+            [],
+        )
+        message = response.get("message", {})
+        new_handoff = message.get("content") if isinstance(message, dict) else ""
+        if not isinstance(new_handoff, str) or not new_handoff.strip():
+            return clear_old_tool_results(protected), handoff_memo
+        new_handoff = new_handoff.strip()
+        if len(new_handoff) > self.options.handoff_max_chars:
+            new_handoff = new_handoff[: self.options.handoff_max_chars] + "\n... [handoff_memo truncated]"
+        self.memory_store.write_handoff(new_handoff)
+        return clear_old_tool_results(protected), new_handoff
+
+    def _estimate_context_tokens(
+        self,
+        *,
+        stable_prefix: StablePrefixState,
+        workspace_prefix: WorkspacePrefixState,
+        memory_anchor: str,
+        file_summaries: str,
+        handoff_memo: str,
+        prior_messages: list[dict[str, Any]],
+        task: str,
+        mode: str,
+    ) -> int:
+        messages = [
+            {"role": "system", "content": stable_prefix.text},
+            {"role": "user", "content": workspace_prefix.text},
+        ]
+        if memory_anchor:
+            messages.append({"role": "user", "content": memory_anchor})
+        if file_summaries:
+            messages.append({"role": "user", "content": file_summaries})
+        if handoff_memo:
+            messages.append({"role": "user", "content": handoff_memo})
+        messages.extend(prior_messages)
+        messages.append({"role": "user", "content": f"<current_task>\nmode: {mode}\ncontent:\n{task}\n</current_task>"})
+        return estimate_tokens(json.dumps(messages, ensure_ascii=False, sort_keys=True))
 
 
 class PromptBuilder:
@@ -395,6 +540,17 @@ class PromptBuilder:
             {"role": "system", "content": envelope.stable_prefix.text},
             {"role": "user", "content": envelope.workspace_prefix.text},
         ]
+        if envelope.memory_anchor:
+            messages.append({"role": "user", "content": envelope.memory_anchor})
+        if envelope.file_summaries:
+            messages.append({"role": "user", "content": envelope.file_summaries})
+        if envelope.handoff_memo:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": f"<handoff_memo>\n{envelope.handoff_memo}\n</handoff_memo>",
+                }
+            )
         if envelope.session_summary:
             messages.append(
                 {
@@ -419,6 +575,69 @@ class PromptBuilder:
             }
         )
         return messages
+
+
+def protect_recent_messages(
+    messages: list[dict[str, Any]],
+    *,
+    protected_recent_turns: int,
+    protected_tool_results: int,
+) -> list[dict[str, Any]]:
+    if protected_recent_turns <= 0:
+        return []
+    protected: list[dict[str, Any]] = []
+    protected_tool_count = 0
+    user_turns = 0
+    for message in reversed(messages):
+        prepared = deepcopy(message)
+        if prepared.get("role") == "tool":
+            protected_tool_count += 1
+            if protected_tool_count > protected_tool_results:
+                prepared["content"] = "[旧 tool 输出已清理，关键结论见 handoff_memo 或 tool_index.jsonl]"
+            protected.append(prepared)
+            continue
+        protected.append(prepared)
+        if prepared.get("role") == "user":
+            user_turns += 1
+            if user_turns >= protected_recent_turns:
+                break
+    protected.reverse()
+    return protected
+
+
+def clear_old_tool_results(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    cleared: list[dict[str, Any]] = []
+    for message in messages:
+        prepared = deepcopy(message)
+        if prepared.get("role") == "tool":
+            content = prepared.get("content")
+            if isinstance(content, str) and len(content) > 4000:
+                prepared["content"] = content[:4000] + "\n... [tool result truncated after compaction]"
+        cleared.append(prepared)
+    return cleared
+
+
+def build_handoff_prompt(
+    *,
+    old_messages: list[dict[str, Any]],
+    previous_handoff: str,
+    memory_anchor: str,
+) -> str:
+    return (
+        "你正在进行上下文检查点压缩。请为即将接手任务的下一个 LLM 实例生成一份清晰、精简、可执行的交接摘要。\n"
+        "必须包含：\n"
+        "1. 当前项目最新进度与核心决策。\n"
+        "2. 必须遵守的代码约束与用户偏好。\n"
+        "3. 已经读过/修改过/验证过的关键文件和结论。\n"
+        "4. 已排除的错误路径，避免重复探索。\n"
+        "5. 剩余 TODO 和下一步最小行动。\n\n"
+        "输出格式必须是 Markdown，标题使用：当前目标、已完成、关键事实、用户偏好、剩余 TODO、下一步。\n\n"
+        f"<previous_handoff>\n{previous_handoff or 'none'}\n</previous_handoff>\n\n"
+        f"{memory_anchor or '<memory_anchor>none</memory_anchor>'}\n\n"
+        "<old_messages_json>\n"
+        f"{json.dumps(old_messages, ensure_ascii=False)}\n"
+        "</old_messages_json>"
+    )
 
 
 class WorkspacePrefixManager:

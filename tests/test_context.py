@@ -16,6 +16,7 @@ from coding_agent.context import (
     estimate_tokens,
     render_workspace_context,
 )
+from coding_agent.memory import MemoryStore
 
 
 def test_usage_stats_parses_openai_cached_tokens():
@@ -652,3 +653,107 @@ def test_context_manager_build_sets_envelope_mode(tmp_path, monkeypatch):
     envelope = manager.build("do the task", [], [], mode="chat")
 
     assert envelope.mode == "chat"
+
+
+def test_context_manager_injects_memory_anchor_and_handoff(tmp_path, monkeypatch):
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent.resolve()))
+    store = MemoryStore(tmp_path)
+    store.save_scratchpad({"project_goal": "优化记忆系统", "modified_files": ["src/a.py"]})
+    store.write_handoff("上一轮已经完成 tool 优化。")
+    options = WorkspaceContextOptions(
+        include_project_docs=False,
+        include_git_status=False,
+        include_recent_commits=False,
+        include_file_tree=False,
+    )
+    manager = ContextManager(tmp_path, options, recent_message_tokens=100, memory_store=store)
+
+    envelope = manager.build("继续", [], [])
+    messages = PromptBuilder().to_messages(envelope)
+
+    assert "优化记忆系统" in messages[2]["content"]
+    assert "<handoff_memo>" in messages[3]["content"]
+    assert "上一轮已经完成 tool 优化。" in messages[3]["content"]
+
+
+def test_context_manager_injects_valid_file_summaries_after_memory_anchor(tmp_path, monkeypatch):
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent.resolve()))
+    path = tmp_path / "module.py"
+    path.write_text("import json\n\nclass Worker:\n    pass\n", encoding="utf-8")
+    store = MemoryStore(tmp_path)
+    store.update_file_summary("module.py")
+    scratchpad = store.load_scratchpad()
+    scratchpad["read_files"] = ["module.py"]
+    store.save_scratchpad(scratchpad)
+    options = WorkspaceContextOptions(
+        include_project_docs=False,
+        include_git_status=False,
+        include_recent_commits=False,
+        include_file_tree=False,
+    )
+    manager = ContextManager(tmp_path, options, recent_message_tokens=100, memory_store=store)
+
+    envelope = manager.build("继续", [], [])
+    messages = PromptBuilder().to_messages(envelope)
+
+    assert "<memory_anchor>" in messages[2]["content"]
+    assert "<file_summaries>" in messages[3]["content"]
+    assert 'path="module.py"' in messages[3]["content"]
+    assert "<current_task>" in messages[4]["content"]
+
+
+class CompactClient:
+    def __init__(self):
+        self.calls = []
+
+    def chat(self, messages, tools):
+        self.calls.append({"messages": messages, "tools": tools})
+        return {"message": {"role": "assistant", "content": "## 当前目标\n继续任务\n\n## 下一步\n读取关键文件"}}
+
+
+def test_context_manager_compacts_old_messages_when_threshold_is_hit(tmp_path, monkeypatch):
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent.resolve()))
+    store = MemoryStore(tmp_path)
+    client = CompactClient()
+    options = WorkspaceContextOptions(
+        include_project_docs=False,
+        include_git_status=False,
+        include_recent_commits=False,
+        include_file_tree=False,
+        max_input_tokens=100,
+        compact_threshold_ratio=0.1,
+        protected_recent_turns=1,
+        protected_tool_results=0,
+    )
+    manager = ContextManager(
+        tmp_path,
+        options,
+        recent_message_tokens=1000,
+        memory_store=store,
+        compact_client=client,
+    )
+    prior = [
+        {"role": "user", "content": "old"},
+        {"role": "assistant", "content": "old answer"},
+        {"role": "user", "content": "new"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "read_file", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call-1", "content": "x" * 5000},
+    ]
+
+    envelope = manager.build("task", prior, [])
+
+    assert client.calls
+    assert "## 当前目标" in envelope.handoff_memo
+    assert store.read_handoff().startswith("## 当前目标")
+    assert envelope.recent_messages[0]["content"] == "new"
+    assert "旧 tool 输出已清理" in envelope.recent_messages[2]["content"]

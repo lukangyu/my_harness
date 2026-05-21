@@ -1,4 +1,5 @@
 import sys
+from types import SimpleNamespace
 
 from coding_agent.policy import CommandPolicy
 from coding_agent.sandbox import WorkspaceSandbox
@@ -39,8 +40,12 @@ def test_write_and_read_file_tools_use_utf8(tmp_path):
     write_result = tools.call("write_file", {"path": "notes/example.txt", "content": "hello\nworld"})
     read_result = tools.call("read_file", {"path": "notes/example.txt"})
 
-    assert write_result == {"ok": True, "path": "notes/example.txt"}
-    assert read_result == {"ok": True, "path": "notes/example.txt", "content": "hello\nworld"}
+    assert write_result["ok"] is True
+    assert write_result["path"] == "notes/example.txt"
+    assert read_result["ok"] is True
+    assert read_result["path"] == "notes/example.txt"
+    assert read_result["content"] == "hello\nworld"
+    assert read_result["metadata"]["total_lines"] == 2
 
 
 def test_list_files_returns_sorted_project_relative_posix_paths(tmp_path):
@@ -53,7 +58,47 @@ def test_list_files_returns_sorted_project_relative_posix_paths(tmp_path):
 
     result = tools.call("list_files", {"path": "pkg"})
 
-    assert result == {"ok": True, "files": ["pkg/a.txt", "pkg/b.txt", "pkg/nested/c.txt"]}
+    assert result["ok"] is True
+    assert result["files"] == ["pkg/a.txt", "pkg/b.txt", "pkg/nested/c.txt"]
+    assert result["metadata"]["truncated"] is False
+
+
+def test_list_files_applies_limit_depth_and_default_ignores(tmp_path):
+    tools = make_tools(tmp_path)
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config").write_text("ignored", encoding="utf-8")
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "a.txt").write_text("a", encoding="utf-8")
+    (tmp_path / "pkg" / "c.txt").write_text("c", encoding="utf-8")
+    (tmp_path / "pkg" / "nested").mkdir()
+    (tmp_path / "pkg" / "nested" / "b.txt").write_text("b", encoding="utf-8")
+
+    result = tools.call("list_files", {"path": ".", "max_depth": 2, "max_entries": 1})
+
+    assert result["ok"] is True
+    assert result["files"] == ["pkg/a.txt"]
+    assert result["metadata"]["truncated"] is True
+    assert ".git/config" not in result["files"]
+
+
+def test_read_file_supports_line_window_and_char_limit(tmp_path):
+    tools = make_tools(tmp_path)
+    (tmp_path / "notes.txt").write_text("one\ntwo\nthree\nfour\n", encoding="utf-8")
+
+    result = tools.call(
+        "read_file",
+        {"path": "notes.txt", "start_line": 2, "line_count": 2, "max_chars": 7},
+    )
+
+    assert result["ok"] is True
+    assert result["content"] == "two\nthr"
+    assert result["metadata"] == {
+        "start_line": 2,
+        "end_line": 3,
+        "total_lines": 4,
+        "returned_chars": 7,
+        "truncated": True,
+    }
 
 
 def test_list_files_returns_error_for_missing_path(tmp_path):
@@ -75,13 +120,70 @@ def test_search_text_finds_matches_and_skips_non_utf8_files(tmp_path):
 
     result = tools.call("search_text", {"query": "needle", "path": "src"})
 
-    assert result == {
-        "ok": True,
-        "matches": [
-            {"path": "src/one.txt", "line": 2, "text": "needle here"},
-            {"path": "src/two.txt", "line": 1, "text": "another needle"},
-        ],
-    }
+    assert result["ok"] is True
+    assert result["matches"] == [
+        {"path": "src/one.txt", "line": 2, "text": "needle here"},
+        {"path": "src/two.txt", "line": 1, "text": "another needle"},
+    ]
+    assert result["metadata"]["truncated"] is False
+
+
+def test_search_text_supports_regex_case_and_glob_limit(tmp_path):
+    tools = make_tools(tmp_path)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "one.py").write_text("Alpha\nneedle_123\n", encoding="utf-8")
+    (tmp_path / "src" / "three.py").write_text("needle_789\n", encoding="utf-8")
+    (tmp_path / "src" / "two.txt").write_text("needle_456\n", encoding="utf-8")
+
+    result = tools.call(
+        "search_text",
+        {
+            "query": "NEEDLE_[0-9]+",
+            "path": "src",
+            "regex": True,
+            "case_sensitive": False,
+            "glob": "*.py",
+            "max_matches": 1,
+        },
+    )
+
+    assert result["ok"] is True
+    assert result["matches"] == [{"path": "src/one.py", "line": 2, "text": "needle_123"}]
+    assert result["metadata"]["truncated"] is True
+
+
+def test_search_text_uses_rg_when_available(tmp_path, monkeypatch):
+    tools = make_tools(tmp_path)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "one.txt").write_text("needle\n", encoding="utf-8")
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return SimpleNamespace(returncode=0, stdout="one.txt:1:needle\n")
+
+    monkeypatch.setattr("coding_agent.tools.shutil.which", lambda name: "rg.exe" if name == "rg" else None)
+    monkeypatch.setattr("coding_agent.tools.subprocess.run", fake_run)
+
+    result = tools.call("search_text", {"query": "needle", "path": "src", "regex": False})
+
+    assert result["ok"] is True
+    assert result["matches"] == [{"path": "src/one.txt", "line": 1, "text": "needle"}]
+    assert result["metadata"]["engine"] == "rg"
+    assert "--fixed-strings" in calls[0][0]
+    assert calls[0][1]["cwd"] == tmp_path / "src"
+
+
+def test_search_text_falls_back_when_rg_is_unavailable(tmp_path, monkeypatch):
+    tools = make_tools(tmp_path)
+    (tmp_path / "notes.txt").write_text("needle\n", encoding="utf-8")
+    monkeypatch.setattr("coding_agent.tools.shutil.which", lambda name: None)
+
+    result = tools.call("search_text", {"query": "needle", "path": "."})
+
+    assert result["ok"] is True
+    assert result["matches"] == [{"path": "notes.txt", "line": 1, "text": "needle"}]
+    assert result["metadata"]["engine"] == "python"
 
 
 def test_unknown_tool_returns_error(tmp_path):
@@ -101,13 +203,49 @@ def test_sandbox_rejection_is_returned_as_tool_error(tmp_path):
     assert "outside workspace" in result["error"]
 
 
-def test_apply_patch_is_explicitly_unsupported(tmp_path):
+def test_apply_patch_updates_adds_and_deletes_files(tmp_path):
+    tools = make_tools(tmp_path)
+    (tmp_path / "old.txt").write_text("remove me\n", encoding="utf-8")
+    (tmp_path / "notes.txt").write_text("one\ntwo\nthree\n", encoding="utf-8")
+
+    result = tools.call(
+        "apply_patch",
+        {
+            "patch": "\n".join(
+                [
+                    "*** Begin Patch",
+                    "*** Update File: notes.txt",
+                    "@@",
+                    " one",
+                    "-two",
+                    "+TWO",
+                    " three",
+                    "*** Add File: nested/new.txt",
+                    "+created",
+                    "*** Delete File: old.txt",
+                    "*** End Patch",
+                ]
+            )
+        },
+    )
+
+    assert result["ok"] is True
+    assert (tmp_path / "notes.txt").read_text(encoding="utf-8") == "one\nTWO\nthree\n"
+    assert (tmp_path / "nested" / "new.txt").read_text(encoding="utf-8") == "created\n"
+    assert not (tmp_path / "old.txt").exists()
+    assert result["changed_files"] == ["notes.txt", "nested/new.txt", "old.txt"]
+
+
+def test_apply_patch_rejects_paths_outside_workspace(tmp_path):
     tools = make_tools(tmp_path)
 
-    result = tools.call("apply_patch", {"patch": "*** Begin Patch\n*** End Patch\n"})
+    result = tools.call(
+        "apply_patch",
+        {"patch": "*** Begin Patch\n*** Add File: ../outside.txt\n+nope\n*** End Patch"},
+    )
 
     assert result["ok"] is False
-    assert "unsupported" in result["error"].lower()
+    assert "outside workspace" in result["error"]
 
 
 def test_run_shell_reports_rejected_command(tmp_path):
@@ -135,7 +273,9 @@ def test_run_shell_reports_allowed_command(tmp_path):
         "stdout": "ok\n",
         "stderr": "",
         "timed_out": False,
+        "metadata": {"elapsed_ms": result["metadata"]["elapsed_ms"]},
     }
+    assert result["metadata"]["elapsed_ms"] >= 0
 
 
 def test_tool_exceptions_are_returned_as_errors():
