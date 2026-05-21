@@ -107,3 +107,40 @@ def test_memory_store_invalidates_summary_after_write_and_patch_results(tmp_path
         result={"ok": True, "changed_files": ["module.py"]},
     )
     assert store.load_file_summaries()["module.py"]["stale_reason"] == "patched"
+
+
+def test_memory_store_archives_dialog_messages_as_jsonl(tmp_path):
+    store = MemoryStore(tmp_path)
+
+    path = store.archive_dialog_messages(
+        [
+            {"role": "user", "content": "old"},
+            {"role": "assistant", "content": "answer"},
+        ]
+    )
+
+    assert path is not None
+    assert path.exists()
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert json.loads(lines[0]) == {"role": "user", "content": "old"}
+    assert path.parent == store.dialog_dir
+
+
+def test_memory_store_offloads_long_tool_result(tmp_path):
+    store = MemoryStore(tmp_path)
+
+    result = store.offload_tool_result(tool="read_file", content="x" * 5000, max_inline_chars=100)
+
+    assert result["offloaded"] is True
+    assert result["original_chars"] == 5000
+    assert "完整 tool 输出已转存" in result["content"]
+    assert len(result["content"]) < 300
+    assert (tmp_path / result["path"]).read_text(encoding="utf-8") == "x" * 5000
+
+
+def test_memory_store_keeps_short_tool_result_inline(tmp_path):
+    store = MemoryStore(tmp_path)
+
+    result = store.offload_tool_result(tool="read_file", content="short", max_inline_chars=100)
+
+    assert result == {"content": "short", "offloaded": False}

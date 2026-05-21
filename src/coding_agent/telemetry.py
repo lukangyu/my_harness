@@ -22,10 +22,15 @@ IGNORED_DIRS = {
 
 
 class TelemetryLogger:
-    def __init__(self, logs_dir: Path | str, workspace_root: Path | str | None = None) -> None:
+    def __init__(
+        self,
+        logs_dir: Path | str,
+        workspace_root: Path | str | None = None,
+        run_id: str | None = None,
+    ) -> None:
         self.logs_dir = Path(logs_dir)
         self.workspace_root = Path(workspace_root).resolve() if workspace_root is not None else None
-        self.run_id = uuid.uuid4().hex
+        self.run_id = run_id or uuid.uuid4().hex
 
     def event(
         self,
@@ -60,13 +65,6 @@ class TelemetryLogger:
     ) -> Iterator[str]:
         span_id = uuid.uuid4().hex
         started = time.perf_counter()
-        self.event(
-            f"{name}.start",
-            f"开始{name}",
-            function=function,
-            phase=phase,
-            metadata={"span_id": span_id, **(metadata or {})},
-        )
         ok = False
         error: str | None = None
         try:
@@ -91,13 +89,6 @@ class TelemetryLogger:
             if error:
                 record["error"] = error
             self._append_jsonl("trace.jsonl", record)
-            self.event(
-                f"{name}.end",
-                f"结束{name}，耗时 {duration_ms} ms",
-                function=function,
-                phase=phase,
-                metadata={"span_id": span_id, "duration_ms": duration_ms, "ok": ok},
-            )
 
     def workspace_snapshot(
         self,

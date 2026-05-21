@@ -702,6 +702,32 @@ def test_context_manager_injects_valid_file_summaries_after_memory_anchor(tmp_pa
     assert "<current_task>" in messages[4]["content"]
 
 
+def test_context_manager_orders_handoff_before_file_summaries(tmp_path, monkeypatch):
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent.resolve()))
+    path = tmp_path / "module.py"
+    path.write_text("class Worker:\n    pass\n", encoding="utf-8")
+    store = MemoryStore(tmp_path)
+    store.update_file_summary("module.py")
+    scratchpad = store.load_scratchpad()
+    scratchpad["read_files"] = ["module.py"]
+    store.save_scratchpad(scratchpad)
+    store.write_handoff("已有交接摘要。")
+    options = WorkspaceContextOptions(
+        include_project_docs=False,
+        include_git_status=False,
+        include_recent_commits=False,
+        include_file_tree=False,
+    )
+    manager = ContextManager(tmp_path, options, recent_message_tokens=100, memory_store=store)
+
+    messages = PromptBuilder().to_messages(manager.build("继续", [], []))
+
+    assert "<memory_anchor>" in messages[2]["content"]
+    assert "<handoff_memo>" in messages[3]["content"]
+    assert "<file_summaries>" in messages[4]["content"]
+    assert "<current_task>" in messages[5]["content"]
+
+
 class CompactClient:
     def __init__(self):
         self.calls = []
@@ -753,7 +779,10 @@ def test_context_manager_compacts_old_messages_when_threshold_is_hit(tmp_path, m
     envelope = manager.build("task", prior, [])
 
     assert client.calls
+    assert "source_refs" in client.calls[0]["messages"][1]["content"]
     assert "## 当前目标" in envelope.handoff_memo
-    assert store.read_handoff().startswith("## 当前目标")
+    assert "## Source References" in envelope.handoff_memo
+    assert store.read_handoff().startswith("## Source References")
     assert envelope.recent_messages[0]["content"] == "new"
     assert "旧 tool 输出已清理" in envelope.recent_messages[2]["content"]
+    assert any(store.dialog_dir.glob("*.jsonl"))

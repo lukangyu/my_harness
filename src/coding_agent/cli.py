@@ -1,5 +1,4 @@
 import json
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
@@ -7,27 +6,15 @@ import typer
 from rich.console import Console
 from rich.markdown import Markdown
 
-from coding_agent.agent import AgentLoop, AgentResult
+from coding_agent.application import Application
 from coding_agent.config import ConfigError, load_config
-from coding_agent.context import WorkspaceContextOptions
-from coding_agent.llm import LLMError, OpenAICompatibleClient
-from coding_agent.memory import MemoryStore
-from coding_agent.policy import CommandPolicy
-from coding_agent.sandbox import WorkspaceSandbox
+from coding_agent.llm import LLMError
+from coding_agent.run_result import RunTaskResult
+from coding_agent.runtime_events import RuntimeEvent
 from coding_agent.session import SessionStore
-from coding_agent.shell import ShellRunner
-from coding_agent.telemetry import TelemetryLogger
-from coding_agent.tools import create_default_tools
 
 app = typer.Typer(help="AI coding assistant CLI")
 console = Console()
-
-
-@dataclass(frozen=True)
-class RunTaskResult:
-    result: AgentResult
-    session_path: Path
-    show_cache_stats: bool
 
 
 @app.command()
@@ -111,91 +98,15 @@ def _run_task(
     mode: str,
 ) -> RunTaskResult:
     config = load_config(Path.cwd())
-    telemetry = TelemetryLogger(
-        config.project_root / ".coding-agent" / "logs",
-        workspace_root=config.workspace.root,
-    )
-    memory_store = MemoryStore(config.project_root)
-    telemetry.event(
-        "cli.task.start",
-        "CLI 收到任务并开始执行",
-        function="_run_task",
-        phase="cli",
-        metadata={"mode": mode, "task_length": len(task), "has_prior_messages": bool(prior_messages)},
-    )
-    telemetry.workspace_snapshot(
-        message_zh="任务开始前的 workspace 文件树和目录树快照",
-        function="_run_task",
-        phase="workspace_before_task",
-        root=config.workspace.root,
-    )
-    sandbox = WorkspaceSandbox(config.workspace.root)
-    policy = CommandPolicy(allow=config.commands.allow, deny=config.commands.deny)
-    shell = ShellRunner(policy=policy, cwd=sandbox.root)
-    tools = create_default_tools(sandbox, shell, telemetry=telemetry, memory_store=memory_store)
     renderer_state = _new_renderer_state()
-    client = OpenAICompatibleClient(
-        base_url=config.model.base_url,
-        api_key=config.model.api_key,
-        model=config.model.model,
-        stream=config.agent.stream,
+    application = Application(
+        config,
         on_reasoning_delta=_make_reasoning_printer(renderer_state),
-        debug_dir=config.project_root / ".coding-agent" / "debug",
-        telemetry=telemetry,
-    )
-    context_options = WorkspaceContextOptions(
-        doc_max_chars=config.context.doc_max_chars,
-        tree_max_entries=config.context.tree_max_entries,
-        include_project_docs=config.context.include_project_docs,
-        include_file_tree=config.context.include_file_tree,
-        include_git_status=config.context.include_git_status,
-        include_recent_commits=config.context.include_recent_commits,
-        max_input_tokens=config.context.max_input_tokens,
-        compact_threshold_ratio=config.context.compact_threshold_ratio,
-        protected_recent_turns=config.context.protected_recent_turns,
-        protected_tool_results=config.context.protected_tool_results,
-        handoff_max_chars=config.context.handoff_max_chars,
-        scratchpad_max_chars=config.context.scratchpad_max_chars,
-        file_summaries_max_count=config.context.file_summaries_max_count,
-        file_summaries_max_chars=config.context.file_summaries_max_chars,
-    )
-    agent = AgentLoop(
-        client=client,
-        tools=tools,
-        max_steps=config.agent.max_steps,
-        cwd=sandbox.root,
-        context_options=context_options,
-        recent_message_tokens=config.context.recent_message_tokens,
         on_tool_call=_make_tool_printer(renderer_state),
-        telemetry=telemetry,
-        memory_store=memory_store,
+        on_runtime_event=_make_runtime_event_printer(renderer_state),
+        command_approval=_make_command_approval(),
     )
-    with telemetry.span(
-        "执行完整任务",
-        function="_run_task",
-        phase="cli",
-        metadata={"mode": mode},
-    ):
-        result = agent.run(task, prior_messages=prior_messages, mode=mode)
-    telemetry.workspace_snapshot(
-        message_zh="任务结束后的 workspace 文件树和目录树快照",
-        function="_run_task",
-        phase="workspace_after_task",
-        root=config.workspace.root,
-    )
-    session_path = SessionStore(config.project_root, telemetry=telemetry).save(result.conversation_messages)
-    telemetry.event(
-        "cli.task.end",
-        "CLI 任务执行完成",
-        function="_run_task",
-        phase="cli",
-        metadata={
-            "session_path": str(session_path),
-            "final_answer_length": len(result.final_answer),
-            "reached_max_steps": result.reached_max_steps,
-        },
-    )
-    return RunTaskResult(result, session_path, config.context.show_cache_stats)
+    return application.run_task(task, prior_messages, mode)
 
 
 def _print_task_result(task_result: RunTaskResult) -> None:
@@ -216,6 +127,8 @@ def _print_task_result(task_result: RunTaskResult) -> None:
         if ratio is not None:
             console.print(f"  Cache: {ratio:.0%} cached input tokens", style="dim")
     console.print(f"  Session: {task_result.session_path}", style="dim", markup=False)
+    if task_result.run_dir is not None:
+        console.print(f"  Run: {task_result.run_dir}", style="dim", markup=False)
 
 
 def _new_renderer_state() -> dict[str, bool]:
@@ -252,6 +165,78 @@ def _make_tool_printer(state: dict[str, bool] | None = None) -> Any:
         console.print(f"  -> {_format_tool_call(tool_call)}", style="cyan", markup=False)
 
     return on_tool_call
+
+
+def _make_runtime_event_printer(state: dict[str, bool] | None = None) -> Any:
+    if state is None:
+        state = _new_renderer_state()
+
+    def on_runtime_event(event: RuntimeEvent) -> None:
+        if event.type == "tool.result":
+            _print_tool_result_event(event, state)
+            return
+        if event.type != "context.built":
+            return
+        if state["reasoning_active"]:
+            console.print()
+            state["reasoning_active"] = False
+        metadata = event.metadata
+        injected = []
+        if metadata.get("memory_anchor"):
+            injected.append("memory")
+        if metadata.get("handoff_memo"):
+            injected.append("handoff")
+        if metadata.get("file_summaries"):
+            injected.append("file summaries")
+        injected_text = ", ".join(injected) if injected else "none"
+        _print_section("context", style="green")
+        console.print(
+            (
+                f"  prompt: injected={injected_text}; "
+                f"recent={metadata.get('recent_messages', 0)}; "
+                f"tools={metadata.get('tool_count', 0)}"
+            ),
+            style="green",
+            markup=False,
+        )
+
+    return on_runtime_event
+
+
+def _make_command_approval() -> Any:
+    def approve(command: str, reason: str) -> bool:
+        return typer.confirm(
+            f"Allow shell command? {command}\nReason: {reason}",
+            default=False,
+        )
+
+    return approve
+
+
+def _print_tool_result_event(event: RuntimeEvent, state: dict[str, bool]) -> None:
+    if state["reasoning_active"]:
+        console.print()
+        state["reasoning_active"] = False
+    if not state["tools_started"]:
+        _print_section("tools", style="cyan")
+        state["tools_started"] = True
+    metadata = event.metadata
+    tool = metadata.get("tool") or "unknown"
+    if metadata.get("ok") is False:
+        console.print(f"  <- {tool} failed: {metadata.get('error') or 'unknown error'}", style="red", markup=False)
+        return
+    details: list[str] = []
+    if metadata.get("path"):
+        details.append(f"path={metadata['path']}")
+    if "exit_code" in metadata:
+        details.append(f"exit_code={metadata['exit_code']}")
+    if metadata.get("timed_out"):
+        details.append("timed_out=true")
+    for key in ("changed_files_count", "matches_count", "files_count"):
+        if key in metadata:
+            details.append(f"{key}={metadata[key]}")
+    suffix = f" ({', '.join(details)})" if details else ""
+    console.print(f"  <- {tool} ok{suffix}", style="cyan", markup=False)
 
 
 def _latest_reasoning(messages: list[dict[str, Any]]) -> str:
@@ -307,7 +292,8 @@ allow = [
   "ruff",
   "mypy",
   "git status",
-  "git diff"
+  "git diff",
+  "git log"
 ]
 deny = [
   "rm",

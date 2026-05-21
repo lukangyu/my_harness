@@ -6,7 +6,50 @@ from coding_agent.agent import AgentResult
 from coding_agent.cli import RunTaskResult, app
 from coding_agent.config import ConfigError
 from coding_agent.context import UsageStats
+from coding_agent.runtime_events import RuntimeEvent
 from coding_agent.session import SessionStore
+
+
+def test_run_task_delegates_to_application(monkeypatch):
+    calls = []
+    fake_config = object()
+
+    class FakeApplication:
+        def __init__(self, config, *, on_reasoning_delta, on_tool_call, on_runtime_event, command_approval):
+            calls.append(
+                {
+                    "config": config,
+                    "has_reasoning": callable(on_reasoning_delta),
+                    "has_tool": callable(on_tool_call),
+                    "has_runtime_event": callable(on_runtime_event),
+                    "has_command_approval": callable(command_approval),
+                }
+            )
+
+        def run_task(self, task, prior_messages, mode):
+            calls.append({"task": task, "prior_messages": prior_messages, "mode": mode})
+            return RunTaskResult(
+                AgentResult(final_answer="answer", messages=[], conversation_messages=[]),
+                "session.json",
+                False,
+            )
+
+    monkeypatch.setattr(cli_module, "load_config", lambda root: fake_config)
+    monkeypatch.setattr(cli_module, "Application", FakeApplication)
+
+    result = cli_module._run_task("summarize", [], "run")
+
+    assert result.result.final_answer == "answer"
+    assert calls == [
+        {
+            "config": fake_config,
+            "has_reasoning": True,
+            "has_tool": True,
+            "has_runtime_event": True,
+            "has_command_approval": True,
+        },
+        {"task": "summarize", "prior_messages": [], "mode": "run"},
+    ]
 
 
 def test_run_without_api_key_prints_error_and_exits(tmp_path, monkeypatch):
@@ -253,6 +296,76 @@ def test_tool_printer_renders_codex_style_event(monkeypatch):
     output = buffer.export_text()
     assert "tools" in output
     assert "-> read_file(path='README.md')" in output
+
+
+def test_runtime_event_printer_renders_prompt_context(monkeypatch):
+    buffer = Console(record=True, width=100)
+    monkeypatch.setattr(cli_module, "console", buffer)
+    printer = cli_module._make_runtime_event_printer()
+
+    printer(
+        RuntimeEvent(
+            type="context.built",
+            message="上下文已组装",
+            metadata={
+                "memory_anchor": True,
+                "handoff_memo": True,
+                "file_summaries": True,
+                "recent_messages": 3,
+                "tool_count": 6,
+            },
+        )
+    )
+
+    output = buffer.export_text()
+    assert "context" in output
+    assert "memory" in output
+    assert "handoff" in output
+    assert "file summaries" in output
+    assert "recent=3" in output
+
+
+def test_runtime_event_printer_renders_failed_tool_result(monkeypatch):
+    buffer = Console(record=True, width=100)
+    monkeypatch.setattr(cli_module, "console", buffer)
+    printer = cli_module._make_runtime_event_printer()
+
+    printer(
+        RuntimeEvent(
+            type="tool.result",
+            message="工具 run_shell 执行完成",
+            metadata={
+                "tool": "run_shell",
+                "ok": False,
+                "error": "Command not in allow list",
+                "exit_code": None,
+                "timed_out": False,
+            },
+        )
+    )
+
+    output = buffer.export_text()
+    assert "tools" in output
+    assert "<- run_shell failed: Command not in allow list" in output
+
+
+def test_command_approval_asks_user(monkeypatch):
+    prompts = []
+
+    def fake_confirm(message, default):
+        prompts.append({"message": message, "default": default})
+        return True
+
+    monkeypatch.setattr(cli_module.typer, "confirm", fake_confirm)
+    approval = cli_module._make_command_approval()
+
+    assert approval("git log --oneline -n 8", "Command not in allow list") is True
+    assert prompts == [
+        {
+            "message": "Allow shell command? git log --oneline -n 8\nReason: Command not in allow list",
+            "default": False,
+        }
+    ]
 
 
 def test_print_task_result_renders_markdown(monkeypatch):

@@ -11,4 +11,6 @@ def test_init_creates_project_config(tmp_path):
     assert result.exit_code == 0
     config_path = tmp_path / ".coding-agent" / "config.toml"
     assert config_path.exists()
-    assert "base_url" in config_path.read_text(encoding="utf-8")
+    config_text = config_path.read_text(encoding="utf-8")
+    assert "base_url" in config_text
+    assert '"git log"' in config_text

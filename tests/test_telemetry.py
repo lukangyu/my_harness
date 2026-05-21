@@ -27,6 +27,8 @@ def test_telemetry_writes_chinese_events_and_trace_jsonl(tmp_path):
     assert traces[0]["function"] == "test_function"
     assert traces[0]["ok"] is True
     assert traces[0]["duration_ms"] >= 0
+    assert not any(record["event"] == "测试阶段.start" for record in events)
+    assert not any(record["event"] == "测试阶段.end" for record in events)
 
 
 def test_workspace_snapshot_records_files_and_directories(tmp_path):

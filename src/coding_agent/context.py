@@ -95,6 +95,12 @@ class CompactClient(Protocol):
 
 
 @dataclass(frozen=True)
+class MessagePartitions:
+    compactable: list[dict[str, Any]]
+    reserved: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
 class UsageStats:
     input_tokens: int | None
     output_tokens: int | None
@@ -470,16 +476,22 @@ class ContextManager:
         if estimated_tokens < threshold:
             return prior_messages, handoff_memo
 
-        protected = protect_recent_messages(
+        partitions = partition_messages(
             prior_messages,
             protected_recent_turns=self.options.protected_recent_turns,
             protected_tool_results=self.options.protected_tool_results,
         )
-        old_count = max(0, len(prior_messages) - len(protected))
+        dialog_path = self.memory_store.archive_dialog_messages(partitions.compactable)
+        source_refs = {
+            "dialog_path": dialog_path.relative_to(self.memory_store.project_root).as_posix() if dialog_path else None,
+            "tool_index_path": self.memory_store.tool_index_path.relative_to(self.memory_store.project_root).as_posix(),
+            "tool_result_dir": self.memory_store.tool_result_dir.relative_to(self.memory_store.project_root).as_posix(),
+        }
         compact_prompt = build_handoff_prompt(
-            old_messages=prior_messages[:old_count],
+            old_messages=partitions.compactable,
             previous_handoff=handoff_memo,
             memory_anchor=memory_anchor,
+            source_refs=source_refs,
         )
         response = self.compact_client.chat(
             [
@@ -491,12 +503,13 @@ class ContextManager:
         message = response.get("message", {})
         new_handoff = message.get("content") if isinstance(message, dict) else ""
         if not isinstance(new_handoff, str) or not new_handoff.strip():
-            return clear_old_tool_results(protected), handoff_memo
+            return clear_old_tool_results(partitions.reserved), handoff_memo
         new_handoff = new_handoff.strip()
+        new_handoff = _prepend_handoff_sources(new_handoff, source_refs)
         if len(new_handoff) > self.options.handoff_max_chars:
             new_handoff = new_handoff[: self.options.handoff_max_chars] + "\n... [handoff_memo truncated]"
         self.memory_store.write_handoff(new_handoff)
-        return clear_old_tool_results(protected), new_handoff
+        return clear_old_tool_results(partitions.reserved), new_handoff
 
     def _estimate_context_tokens(
         self,
@@ -542,8 +555,6 @@ class PromptBuilder:
         ]
         if envelope.memory_anchor:
             messages.append({"role": "user", "content": envelope.memory_anchor})
-        if envelope.file_summaries:
-            messages.append({"role": "user", "content": envelope.file_summaries})
         if envelope.handoff_memo:
             messages.append(
                 {
@@ -551,6 +562,8 @@ class PromptBuilder:
                     "content": f"<handoff_memo>\n{envelope.handoff_memo}\n</handoff_memo>",
                 }
             )
+        if envelope.file_summaries:
+            messages.append({"role": "user", "content": envelope.file_summaries})
         if envelope.session_summary:
             messages.append(
                 {
@@ -577,18 +590,20 @@ class PromptBuilder:
         return messages
 
 
-def protect_recent_messages(
+def partition_messages(
     messages: list[dict[str, Any]],
     *,
     protected_recent_turns: int,
     protected_tool_results: int,
-) -> list[dict[str, Any]]:
+) -> MessagePartitions:
     if protected_recent_turns <= 0:
-        return []
+        return MessagePartitions(compactable=list(messages), reserved=[])
     protected: list[dict[str, Any]] = []
     protected_tool_count = 0
     user_turns = 0
+    cutoff = len(messages)
     for message in reversed(messages):
+        cutoff -= 1
         prepared = deepcopy(message)
         if prepared.get("role") == "tool":
             protected_tool_count += 1
@@ -602,7 +617,20 @@ def protect_recent_messages(
             if user_turns >= protected_recent_turns:
                 break
     protected.reverse()
-    return protected
+    return MessagePartitions(compactable=list(messages[:cutoff]), reserved=protected)
+
+
+def protect_recent_messages(
+    messages: list[dict[str, Any]],
+    *,
+    protected_recent_turns: int,
+    protected_tool_results: int,
+) -> list[dict[str, Any]]:
+    return partition_messages(
+        messages,
+        protected_recent_turns=protected_recent_turns,
+        protected_tool_results=protected_tool_results,
+    ).reserved
 
 
 def clear_old_tool_results(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -622,6 +650,7 @@ def build_handoff_prompt(
     old_messages: list[dict[str, Any]],
     previous_handoff: str,
     memory_anchor: str,
+    source_refs: dict[str, str | None],
 ) -> str:
     return (
         "你正在进行上下文检查点压缩。请为即将接手任务的下一个 LLM 实例生成一份清晰、精简、可执行的交接摘要。\n"
@@ -632,12 +661,25 @@ def build_handoff_prompt(
         "4. 已排除的错误路径，避免重复探索。\n"
         "5. 剩余 TODO 和下一步最小行动。\n\n"
         "输出格式必须是 Markdown，标题使用：当前目标、已完成、关键事实、用户偏好、剩余 TODO、下一步。\n\n"
+        "<source_refs>\n"
+        f"{json.dumps(source_refs, ensure_ascii=False)}\n"
+        "</source_refs>\n\n"
         f"<previous_handoff>\n{previous_handoff or 'none'}\n</previous_handoff>\n\n"
         f"{memory_anchor or '<memory_anchor>none</memory_anchor>'}\n\n"
         "<old_messages_json>\n"
         f"{json.dumps(old_messages, ensure_ascii=False)}\n"
         "</old_messages_json>"
     )
+
+
+def _prepend_handoff_sources(handoff: str, source_refs: dict[str, str | None]) -> str:
+    lines = ["## Source References"]
+    for key, value in source_refs.items():
+        if value:
+            lines.append(f"- {key}: {value}")
+    lines.append("")
+    lines.append(handoff)
+    return "\n".join(lines)
 
 
 class WorkspacePrefixManager:

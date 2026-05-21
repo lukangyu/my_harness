@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 import json
 import time
+import uuid
 
 from coding_agent.file_summary import file_hash, is_summary_valid, summarize_file
 
@@ -21,13 +22,20 @@ DEFAULT_SCRATCHPAD: dict[str, Any] = {
 
 
 class MemoryStore:
-    def __init__(self, project_root: Path | str) -> None:
+    def __init__(
+        self,
+        project_root: Path | str,
+        dialog_dir: Path | str | None = None,
+        tool_result_dir: Path | str | None = None,
+    ) -> None:
         self.project_root = Path(project_root)
         self.memory_dir = self.project_root / ".coding-agent" / "memory"
         self.scratchpad_path = self.memory_dir / "scratchpad.json"
         self.handoff_path = self.memory_dir / "handoff.md"
         self.tool_index_path = self.memory_dir / "tool_index.jsonl"
         self.file_summaries_path = self.memory_dir / "file_summaries.json"
+        self.dialog_dir = Path(dialog_dir) if dialog_dir is not None else self.memory_dir / "dialog"
+        self.tool_result_dir = Path(tool_result_dir) if tool_result_dir is not None else self.memory_dir / "tool_result"
 
     def load_scratchpad(self) -> dict[str, Any]:
         if not self.scratchpad_path.exists():
@@ -60,6 +68,41 @@ class MemoryStore:
     def write_handoff(self, content: str) -> None:
         self.memory_dir.mkdir(parents=True, exist_ok=True)
         self.handoff_path.write_text(content.strip() + "\n", encoding="utf-8")
+
+    def archive_dialog_messages(self, messages: list[dict[str, Any]]) -> Path | None:
+        if not messages:
+            return None
+        self.dialog_dir.mkdir(parents=True, exist_ok=True)
+        path = self.dialog_dir / f"{time.strftime('%Y-%m-%d', time.localtime())}-{uuid.uuid4().hex[:8]}.jsonl"
+        with path.open("w", encoding="utf-8") as file:
+            for message in messages:
+                file.write(json.dumps(message, ensure_ascii=False, default=str) + "\n")
+        return path
+
+    def offload_tool_result(
+        self,
+        *,
+        tool: str,
+        content: str,
+        max_inline_chars: int = 4000,
+    ) -> dict[str, Any]:
+        if len(content) <= max_inline_chars:
+            return {"content": content, "offloaded": False}
+        self.tool_result_dir.mkdir(parents=True, exist_ok=True)
+        path = self.tool_result_dir / f"{time.strftime('%Y%m%d-%H%M%S', time.localtime())}-{uuid.uuid4().hex[:8]}.txt"
+        path.write_text(content, encoding="utf-8")
+        relative = path.relative_to(self.project_root).as_posix()
+        snippet = content[:max_inline_chars]
+        return {
+            "content": (
+                f"{snippet}\n"
+                f"... [完整 tool 输出已转存到 {relative}，当前上下文只保留前 {max_inline_chars} 字符]"
+            ),
+            "offloaded": True,
+            "path": relative,
+            "original_chars": len(content),
+            "tool": tool,
+        }
 
     def append_tool_index(self, record: dict[str, Any]) -> None:
         self.memory_dir.mkdir(parents=True, exist_ok=True)

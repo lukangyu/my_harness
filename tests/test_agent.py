@@ -6,6 +6,7 @@ import httpx
 
 from coding_agent.agent import AgentLoop
 from coding_agent.context import UsageStats, WorkspaceContextOptions
+from coding_agent.runtime_events import RuntimeEvent
 from coding_agent.llm import LLMError, OpenAICompatibleClient
 from coding_agent.policy import CommandPolicy
 from coding_agent.sandbox import WorkspaceSandbox
@@ -228,6 +229,85 @@ def test_agent_emits_tool_call_event_before_execution(tmp_path):
     ]
 
 
+def test_agent_emits_progress_events_after_model_and_tool_steps(tmp_path):
+    progress = []
+    client = FakeClient(
+        [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        tool_call(
+                            "write_file",
+                            json.dumps({"path": "notes.txt", "content": "hello"}),
+                        )
+                    ],
+                }
+            },
+            {"message": {"role": "assistant", "content": "done"}},
+        ]
+    )
+    agent = AgentLoop(
+        client,
+        make_tools(tmp_path),
+        max_steps=3,
+        cwd=tmp_path,
+        context_options=context_options(),
+        on_progress=progress.append,
+    )
+
+    result = agent.run("write a note")
+
+    assert result.final_answer == "done"
+    assert progress == [
+        {"type": "model_attempt", "attempts": 1, "step": 1},
+        {"type": "tool_step", "tool_steps": 1, "tool": "write_file", "step": 1},
+        {"type": "model_attempt", "attempts": 2, "step": 2},
+    ]
+
+
+def test_agent_emits_runtime_event_for_tool_result(tmp_path):
+    events: list[RuntimeEvent] = []
+    client = FakeClient(
+        [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [tool_call("run_shell", json.dumps({"command": "git log --oneline -n 8"}))],
+                }
+            },
+            {"message": {"role": "assistant", "content": "done"}},
+        ]
+    )
+    agent = AgentLoop(
+        client,
+        make_tools(tmp_path),
+        max_steps=3,
+        cwd=tmp_path,
+        context_options=context_options(),
+        on_runtime_event=events.append,
+    )
+
+    agent.run("show recent commits")
+
+    tool_events = [event for event in events if event.type == "tool.result"]
+    assert tool_events == [
+        RuntimeEvent(
+            type="tool.result",
+            message="工具 run_shell 执行完成",
+            metadata={
+                "tool": "run_shell",
+                "ok": False,
+                "error": "Command not in allow list",
+                "exit_code": None,
+                "timed_out": False,
+            },
+        )
+    ]
+
+
 def test_agent_stops_after_max_steps(tmp_path):
     client = FakeClient(
         [
@@ -374,6 +454,36 @@ def test_agent_includes_workspace_context_for_empty_prior_messages(tmp_path):
     assert "<current_task>" in client.calls[0]["messages"][2]["content"]
     assert "mode: run" in client.calls[0]["messages"][2]["content"]
     assert "new task" in client.calls[0]["messages"][2]["content"]
+
+
+def test_agent_emits_runtime_event_for_prompt_context(tmp_path):
+    events: list[RuntimeEvent] = []
+    (tmp_path / "README.md").write_text("hello workspace", encoding="utf-8")
+    client = FakeClient([{"message": {"role": "assistant", "content": "answer"}}])
+    agent = AgentLoop(
+        client,
+        make_tools(tmp_path),
+        max_steps=1,
+        cwd=tmp_path,
+        context_options=context_options(),
+        on_runtime_event=events.append,
+    )
+
+    agent.run("new task")
+
+    assert events == [
+        RuntimeEvent(
+            type="context.built",
+            message="上下文已组装",
+            metadata={
+                "tool_count": 6,
+                "recent_messages": 0,
+                "memory_anchor": False,
+                "handoff_memo": False,
+                "file_summaries": False,
+            },
+        )
+    ]
 
 
 def test_llm_client_posts_openai_compatible_chat_request(monkeypatch):

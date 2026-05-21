@@ -6,6 +6,7 @@ import shlex
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from coding_agent.policy import CommandDecision, CommandPolicy
 
@@ -25,6 +26,7 @@ class ShellRunner:
     policy: CommandPolicy
     cwd: Path
     timeout_seconds: float = 120
+    approval_callback: Callable[[str, str], bool] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "cwd", Path(self.cwd))
@@ -32,13 +34,30 @@ class ShellRunner:
     def run(self, command: str) -> ShellResult:
         policy_result = self.policy.evaluate(command)
         if policy_result.decision is not CommandDecision.ALLOW:
-            return ShellResult(
-                command=command,
-                allowed=False,
-                exit_code=None,
-                stdout="",
-                stderr=policy_result.reason,
-            )
+            if not _can_request_approval(policy_result.reason):
+                return ShellResult(
+                    command=command,
+                    allowed=False,
+                    exit_code=None,
+                    stdout="",
+                    stderr=policy_result.reason,
+                )
+            if self.approval_callback is None:
+                return ShellResult(
+                    command=command,
+                    allowed=False,
+                    exit_code=None,
+                    stdout="",
+                    stderr=policy_result.reason,
+                )
+            if not self.approval_callback(command, policy_result.reason):
+                return ShellResult(
+                    command=command,
+                    allowed=False,
+                    exit_code=None,
+                    stdout="",
+                    stderr="Command rejected by human approval",
+                )
 
         try:
             argv = _command_to_argv(command, self.cwd)
@@ -117,3 +136,7 @@ def _strip_outer_quotes(value: str) -> str:
     if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
         return value[1:-1]
     return value
+
+
+def _can_request_approval(reason: str) -> bool:
+    return reason == "Command not in allow list"
