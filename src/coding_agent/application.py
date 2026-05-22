@@ -3,21 +3,26 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable
 
-from coding_agent.agent import AgentLoop
 from coding_agent.config import AppConfig
-from coding_agent.context import WorkspaceContextOptions
+from coding_agent.context.context import WorkspaceContextOptions
+from coding_agent.context.assembler import ContextAssembler
+from coding_agent.context.prompt_builder import create_default_prompt_builder
+from coding_agent.execution.policy import CommandPolicy
+from coding_agent.execution.sandbox import WorkspaceSandbox
+from coding_agent.execution.shell import ShellRunner
+from coding_agent.execution.tools import create_default_tools
+from coding_agent.hooks.compaction_hook import ContextCompactionHook
+from coding_agent.hooks.memory_hook import MemoryProjectionHook
 from coding_agent.llm import OpenAICompatibleClient
-from coding_agent.memory import MemoryStore
-from coding_agent.policy import CommandPolicy
-from coding_agent.run_coordinator import RunCoordinator
+from coding_agent.memory.store import MemoryStore
+from coding_agent.orchestrator.agent_loop import AgentLoop
+from coding_agent.orchestrator.coordinator import RunCoordinator
+from coding_agent.orchestrator.lifecycle import AgentLifecycleHook
 from coding_agent.run_result import RunTaskResult
 from coding_agent.runtime_events import RuntimeEvent
-from coding_agent.run_store import RunStore
-from coding_agent.sandbox import WorkspaceSandbox
 from coding_agent.session import SessionStore
-from coding_agent.shell import ShellRunner
-from coding_agent.telemetry import TelemetryLogger
-from coding_agent.tools import create_default_tools
+from coding_agent.telemetry.logger import TelemetryLogger
+from coding_agent.telemetry.store import RunStore
 
 
 ToolPrinter = Callable[[dict], None]
@@ -35,12 +40,14 @@ class Application:
         on_tool_call: ToolPrinter | None = None,
         on_runtime_event: RuntimeEventPrinter | None = None,
         command_approval: CommandApproval | None = None,
+        lifecycle_hooks: list[AgentLifecycleHook] | None = None,
     ) -> None:
         self.config = config
         self.on_reasoning_delta = on_reasoning_delta
         self.on_tool_call = on_tool_call
         self.on_runtime_event = on_runtime_event
         self.command_approval = command_approval
+        self.lifecycle_hooks = list(lifecycle_hooks or [])
 
     def run_task(
         self,
@@ -67,7 +74,7 @@ class Application:
         )
         policy = CommandPolicy(allow=self.config.commands.allow, deny=self.config.commands.deny)
         shell = ShellRunner(policy=policy, cwd=sandbox.root, approval_callback=self.command_approval)
-        tools = create_default_tools(sandbox, shell, telemetry=telemetry, memory_store=memory_store)
+        tools = create_default_tools(sandbox, shell)
         client = OpenAICompatibleClient(
             base_url=self.config.model.base_url,
             api_key=self.config.model.api_key,
@@ -95,8 +102,19 @@ class Application:
             on_tool_call=self.on_tool_call,
             telemetry=telemetry,
             memory_store=memory_store,
+            context_assembler=ContextAssembler(
+                cwd=sandbox.root,
+                options=_context_options(self.config),
+                memory_store=memory_store,
+            ),
             on_progress=coordinator.record_progress,
             on_runtime_event=self.on_runtime_event,
+            lifecycle_hooks=[
+                ContextCompactionHook(memory_store=memory_store, compact_client=client),
+                MemoryProjectionHook(memory_store),
+                *self.lifecycle_hooks,
+            ],
+            prompt_builder=create_default_prompt_builder(),
         )
         return coordinator.run(
             agent=agent,

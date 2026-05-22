@@ -1,4 +1,4 @@
-from coding_agent.file_summary import detect_language, file_hash, is_summary_valid, summarize_file
+from coding_agent.memory.stores.file_summary import detect_language, file_hash, is_summary_valid, summarize_file
 
 
 def test_python_summary_extracts_imports_classes_methods_and_docstrings(tmp_path):

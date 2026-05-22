@@ -1,7 +1,7 @@
 import json
 
-from coding_agent.context import UsageStats
-from coding_agent.run_store import RunStore
+from coding_agent.context.context import UsageStats
+from coding_agent.telemetry.store import RunStore
 
 
 def test_run_store_creates_run_artifacts_and_initial_task_state(tmp_path):

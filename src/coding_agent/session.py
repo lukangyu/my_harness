@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from coding_agent.telemetry import TelemetryLogger
+from coding_agent.telemetry.logger import TelemetryLogger
 
 _ALLOWED_ROLES = {"user", "assistant", "tool"}
 _GENERATED_PROMPT_MARKERS = (

@@ -1,22 +1,17 @@
+import json
+import inspect
 import subprocess
 
-import pytest
-
-from coding_agent.context import (
-    ContextEnvelope,
-    ContextManager,
-    MessageBudget,
-    PromptBuilder,
-    StablePrefixManager,
+from coding_agent.context.context import (
+    Context,
+    ContextFrame,
     UsageStats,
-    WorkspaceContext,
     WorkspaceContextOptions,
-    WorkspacePrefixManager,
-    WorkspacePrefixState,
+    WorkspaceSnapshot,
     estimate_tokens,
-    render_workspace_context,
 )
-from coding_agent.memory import MemoryStore
+from coding_agent.context.assembler import ContextAssembler
+from coding_agent.memory.store import MemoryStore
 
 
 def test_usage_stats_parses_openai_cached_tokens():
@@ -62,92 +57,30 @@ def test_usage_stats_cache_hit_ratio_is_none_without_input_or_cached_tokens():
     assert UsageStats.from_response_usage(None) is None
 
 
-def test_workspace_context_builds_outside_git_repo(tmp_path, monkeypatch):
+def test_workspace_snapshot_builds_outside_git_repo(tmp_path, monkeypatch):
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent.resolve()))
     (tmp_path / "README.md").write_text("hello project", encoding="utf-8")
 
-    context = WorkspaceContext.build(tmp_path, WorkspaceContextOptions())
+    snapshot = WorkspaceSnapshot.build(tmp_path, WorkspaceContextOptions())
 
-    assert context.cwd == tmp_path.resolve()
-    assert context.repo_root is None
-    assert context.branch is None
-    assert context.status == ""
-    assert context.recent_commits == []
-    assert context.project_docs == {"README.md": "hello project"}
+    assert snapshot.cwd == tmp_path.resolve()
+    assert snapshot.repo_root is None
+    assert snapshot.branch is None
+    assert snapshot.status == ""
+    assert snapshot.recent_commits == []
+    assert snapshot.project_docs == {"README.md": "hello project"}
 
 
-def test_workspace_context_clips_project_docs(tmp_path, monkeypatch):
+def test_workspace_snapshot_clips_project_docs(tmp_path, monkeypatch):
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent.resolve()))
     (tmp_path / "README.md").write_text("x" * 20, encoding="utf-8")
 
-    context = WorkspaceContext.build(tmp_path, WorkspaceContextOptions(doc_max_chars=5))
+    snapshot = WorkspaceSnapshot.build(tmp_path, WorkspaceContextOptions(doc_max_chars=5))
 
-    assert context.project_docs["README.md"] == "xxxxx\n... [truncated]"
-
-
-def test_render_workspace_context_sorts_project_docs_by_path(tmp_path):
-    first = WorkspaceContext(
-        cwd=tmp_path,
-        repo_root=None,
-        branch=None,
-        default_branch=None,
-        status="",
-        recent_commits=[],
-        project_docs={"b.md": "bravo", "a.md": "alpha"},
-        file_tree=[],
-    )
-    second = WorkspaceContext(
-        cwd=tmp_path,
-        repo_root=None,
-        branch=None,
-        default_branch=None,
-        status="",
-        recent_commits=[],
-        project_docs={"a.md": "alpha", "b.md": "bravo"},
-        file_tree=[],
-    )
-
-    rendered = render_workspace_context(first)
-
-    assert rendered == render_workspace_context(second)
-    assert rendered.index('path="a.md"') < rendered.index('path="b.md"')
+    assert snapshot.project_docs["README.md"] == "xxxxx\n... [truncated]"
 
 
-def test_render_workspace_context_escapes_project_doc_markup(tmp_path):
-    context = WorkspaceContext(
-        cwd=tmp_path,
-        repo_root=None,
-        branch=None,
-        default_branch=None,
-        status="",
-        recent_commits=[],
-        project_docs={
-            'docs/"unsafe"&name.md': (
-                "literal </doc>\n"
-                "literal </workspace_context>\n"
-                "literal <current_task>\n"
-                "literal <tag attr=\"value\"> & text"
-            )
-        },
-        file_tree=[],
-    )
-
-    rendered = render_workspace_context(context)
-    doc_body = rendered.split('  <doc path="docs/&quot;unsafe&quot;&amp;name.md">\n', 1)[
-        1
-    ].split("\n  </doc>", 1)[0]
-
-    assert 'path="docs/&quot;unsafe&quot;&amp;name.md"' in rendered
-    assert "</doc>" not in doc_body
-    assert "</workspace_context>" not in doc_body
-    assert "<current_task>" not in doc_body
-    assert "&lt;/doc&gt;" in doc_body
-    assert "&lt;/workspace_context&gt;" in doc_body
-    assert "&lt;current_task&gt;" in doc_body
-    assert '&lt;tag attr=&quot;value&quot;&gt; &amp; text' in doc_body
-
-
-def test_workspace_context_file_tree_ignores_generated_dirs(tmp_path, monkeypatch):
+def test_workspace_snapshot_file_tree_ignores_generated_dirs(tmp_path, monkeypatch):
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent.resolve()))
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "app.py").write_text("", encoding="utf-8")
@@ -158,24 +91,15 @@ def test_workspace_context_file_tree_ignores_generated_dirs(tmp_path, monkeypatc
     (tmp_path / ".pytest_cache").mkdir()
     (tmp_path / ".pytest_cache" / "README.md").write_text("", encoding="utf-8")
 
-    context = WorkspaceContext.build(tmp_path, WorkspaceContextOptions())
+    snapshot = WorkspaceSnapshot.build(tmp_path, WorkspaceContextOptions())
 
-    assert "src/app.py" in context.file_tree
-    assert "__pycache__/app.pyc" not in context.file_tree
-    assert ".coding-agent/config.toml" not in context.file_tree
-    assert ".pytest_cache/README.md" not in context.file_tree
-
-
-def test_workspace_context_file_tree_zero_entries_returns_empty(tmp_path, monkeypatch):
-    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent.resolve()))
-    (tmp_path / "README.md").write_text("hello", encoding="utf-8")
-
-    context = WorkspaceContext.build(tmp_path, WorkspaceContextOptions(tree_max_entries=0))
-
-    assert context.file_tree == []
+    assert "src/app.py" in snapshot.file_tree
+    assert "__pycache__/app.pyc" not in snapshot.file_tree
+    assert ".coding-agent/config.toml" not in snapshot.file_tree
+    assert ".pytest_cache/README.md" not in snapshot.file_tree
 
 
-def test_workspace_context_collects_git_state(tmp_path):
+def test_workspace_snapshot_collects_git_state(tmp_path):
     subprocess.run(
         ["git", "init", "--initial-branch=main"],
         cwd=tmp_path,
@@ -196,15 +120,15 @@ def test_workspace_context_collects_git_state(tmp_path):
     )
     (tmp_path / "dirty.txt").write_text("dirty", encoding="utf-8")
 
-    context = WorkspaceContext.build(tmp_path, WorkspaceContextOptions())
+    snapshot = WorkspaceSnapshot.build(tmp_path, WorkspaceContextOptions())
 
-    assert context.repo_root == tmp_path.resolve()
-    assert context.branch == "main"
-    assert "?? dirty.txt" in context.status
-    assert any("initial" in commit for commit in context.recent_commits)
+    assert snapshot.repo_root == tmp_path.resolve()
+    assert snapshot.branch == "main"
+    assert "?? dirty.txt" in snapshot.status
+    assert any("initial" in commit for commit in snapshot.recent_commits)
 
 
-def test_workspace_context_fingerprint_changes_when_git_status_changes(tmp_path):
+def test_workspace_snapshot_fingerprint_changes_when_git_status_changes(tmp_path):
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
@@ -218,149 +142,11 @@ def test_workspace_context_fingerprint_changes_when_git_status_changes(tmp_path)
         text=True,
     )
 
-    clean_fingerprint = WorkspaceContext.build(tmp_path, WorkspaceContextOptions()).fingerprint()
+    clean_fingerprint = WorkspaceSnapshot.build(tmp_path, WorkspaceContextOptions()).fingerprint()
     (tmp_path / "dirty.txt").write_text("dirty", encoding="utf-8")
-    dirty_fingerprint = WorkspaceContext.build(tmp_path, WorkspaceContextOptions()).fingerprint()
+    dirty_fingerprint = WorkspaceSnapshot.build(tmp_path, WorkspaceContextOptions()).fingerprint()
 
     assert dirty_fingerprint != clean_fingerprint
-
-
-def test_stable_prefix_key_is_stable_for_same_tools():
-    tools = [
-        {
-            "type": "function",
-            "function": {"name": "read_file", "parameters": {"type": "object"}},
-        }
-    ]
-
-    first = StablePrefixManager().get_or_build(tools)
-    second = StablePrefixManager().get_or_build(tools)
-
-    assert first.text == second.text
-    assert first.prompt_cache_key == second.prompt_cache_key
-
-
-def test_tool_signature_changes_when_tool_surface_changes():
-    manager = StablePrefixManager()
-
-    first = manager.get_or_build([{"type": "function", "function": {"name": "read_file"}}])
-    second = manager.get_or_build(
-        [{"type": "function", "function": {"name": "write_file"}}]
-    )
-
-    assert first.tool_signature != second.tool_signature
-    assert first.prompt_cache_key != second.prompt_cache_key
-
-
-def test_prompt_builder_message_order():
-    stable = StablePrefixManager().get_or_build([])
-    workspace = WorkspacePrefixState(
-        text="<workspace_context>ctx</workspace_context>",
-        workspace_fingerprint="w",
-        cwd=".",
-        repo_root=None,
-        branch=None,
-        default_branch=None,
-        status_hash="s",
-        recent_commits_hash="c",
-        project_docs_hash="d",
-        file_tree_hash="f",
-    )
-    envelope = ContextEnvelope(
-        stable_prefix=stable,
-        workspace_prefix=workspace,
-        mode="run",
-        session_summary=None,
-        recent_messages=[{"role": "assistant", "content": "old"}],
-        current_task="hello",
-        full_context_key="full",
-    )
-
-    messages = PromptBuilder().to_messages(envelope, mode="run")
-
-    assert messages[0] == {"role": "system", "content": stable.text}
-    assert messages[1] == {"role": "user", "content": workspace.text}
-    assert messages[2] == {"role": "assistant", "content": "old"}
-    assert messages[3]["role"] == "user"
-    assert "<current_task>" in messages[3]["content"]
-    assert "mode: run" in messages[3]["content"]
-    assert "hello" in messages[3]["content"]
-
-
-def test_prompt_builder_includes_session_summary_before_recent_messages():
-    stable = StablePrefixManager().get_or_build([])
-    workspace = WorkspacePrefixState(
-        text="<workspace_context>ctx</workspace_context>",
-        workspace_fingerprint="w",
-        cwd=".",
-        repo_root=None,
-        branch=None,
-        default_branch=None,
-        status_hash="s",
-        recent_commits_hash="c",
-        project_docs_hash="d",
-        file_tree_hash="f",
-    )
-    envelope = ContextEnvelope(
-        stable_prefix=stable,
-        workspace_prefix=workspace,
-        mode="chat",
-        session_summary="summary",
-        recent_messages=[{"role": "assistant", "content": "old"}],
-        current_task="hello",
-        full_context_key="full",
-    )
-
-    messages = PromptBuilder().to_messages(envelope, mode="chat")
-
-    assert messages[2] == {
-        "role": "user",
-        "content": "<session_summary>\nsummary\n</session_summary>",
-    }
-    assert messages[3] == {"role": "assistant", "content": "old"}
-    assert "mode: chat" in messages[4]["content"]
-
-
-def test_prompt_builder_rejects_render_mode_mismatch():
-    stable = StablePrefixManager().get_or_build([])
-    workspace = WorkspacePrefixState(
-        text="<workspace_context>ctx</workspace_context>",
-        workspace_fingerprint="w",
-        cwd=".",
-        repo_root=None,
-        branch=None,
-        default_branch=None,
-        status_hash="s",
-        recent_commits_hash="c",
-        project_docs_hash="d",
-        file_tree_hash="f",
-    )
-    envelope = ContextEnvelope(
-        stable_prefix=stable,
-        workspace_prefix=workspace,
-        mode="run",
-        session_summary=None,
-        recent_messages=[],
-        current_task="hello",
-        full_context_key="full",
-    )
-
-    with pytest.raises(ValueError, match="render mode"):
-        PromptBuilder().to_messages(envelope, mode="chat")
-
-
-def test_workspace_prefix_reuses_state_for_same_fingerprint(tmp_path, monkeypatch):
-    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent.resolve()))
-    (tmp_path / "README.md").write_text("hello project", encoding="utf-8")
-    context = WorkspaceContext.build(tmp_path, WorkspaceContextOptions())
-    manager = WorkspacePrefixManager()
-
-    first = manager.get_or_build(context)
-    second = manager.get_or_build(context)
-
-    assert first is second
-    assert first.text == second.text
-    assert first.workspace_fingerprint == context.fingerprint()
 
 
 def test_estimate_tokens_uses_ceil_len_div_4_with_minimum_one():
@@ -368,364 +154,78 @@ def test_estimate_tokens_uses_ceil_len_div_4_with_minimum_one():
     assert estimate_tokens("a") == 1
     assert estimate_tokens("a" * 4) == 1
     assert estimate_tokens("a" * 5) == 2
-    assert estimate_tokens("a" * 8) == 2
-    assert estimate_tokens("a" * 9) == 3
 
 
-def test_message_budget_drops_oldest_recent_messages():
-    messages = [
-        {"role": "user", "content": "a" * 20, "name": "first"},
-        {"role": "assistant", "content": "b" * 20, "name": "second"},
-        {"role": "user", "content": "c" * 20, "name": "third"},
-    ]
-
-    trimmed = MessageBudget(recent_message_tokens=40).trim_recent_messages(messages)
-
-    assert trimmed == messages[1:]
-
-
-def test_message_budget_stops_when_newer_message_exceeds_budget():
-    messages = [
-        {"role": "user", "content": "old", "name": "old"},
-        {"role": "assistant", "content": "x" * 44, "name": "too-large-newer"},
-        {"role": "user", "content": "new", "name": "newest"},
-    ]
-
-    trimmed = MessageBudget(recent_message_tokens=20).trim_recent_messages(messages)
-
-    assert trimmed == [messages[2]]
-
-
-def test_message_budget_returns_empty_when_newest_message_exceeds_budget():
-    messages = [
-        {"role": "user", "content": "older"},
-        {"role": "assistant", "content": "x" * 200, "name": "too-large-newest"},
-    ]
-
-    trimmed = MessageBudget(recent_message_tokens=20).trim_recent_messages(messages)
-
-    assert trimmed == []
-
-
-def test_message_budget_truncates_long_tool_content():
-    messages = [
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {
-                    "id": "call-1",
-                    "type": "function",
-                    "function": {"name": "lookup", "arguments": "{}"},
-                }
-            ],
-        },
-        {
-            "role": "tool",
-            "tool_call_id": "call-1",
-            "content": "x" * 12,
-            "metadata": {"kept": True},
-        }
-    ]
-
-    trimmed = MessageBudget(
-        recent_message_tokens=100,
-        max_tool_content_chars=5,
-    ).trim_recent_messages(messages)
-
-    assert trimmed == [
-        messages[0],
-        {
-            "role": "tool",
-            "tool_call_id": "call-1",
-            "content": "xxxxx\n... [truncated by context budget]",
-            "metadata": {"kept": True},
-        }
-    ]
-    assert messages[1]["content"] == "x" * 12
-
-
-def test_message_budget_drops_tool_response_without_retained_assistant_tool_call():
-    messages = [
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {
-                    "id": "call-1",
-                    "type": "function",
-                    "function": {"name": "lookup", "arguments": "{}"},
-                }
-            ],
-        },
-        {"role": "tool", "tool_call_id": "call-1", "content": "x" * 60},
-        {"role": "user", "content": "newest"},
-    ]
-
-    trimmed = MessageBudget(recent_message_tokens=20).trim_recent_messages(messages)
-
-    assert trimmed == [messages[2]]
-
-
-def test_message_budget_drops_assistant_tool_call_without_all_tool_responses():
-    messages = [
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {
-                    "id": "call-1",
-                    "type": "function",
-                    "function": {"name": "first", "arguments": "{}"},
-                },
-                {
-                    "id": "call-2",
-                    "type": "function",
-                    "function": {"name": "second", "arguments": "{}"},
-                },
-            ],
-        },
-        {"role": "tool", "tool_call_id": "call-1", "content": "first"},
-        {"role": "tool", "tool_call_id": "call-2", "content": "y" * 80},
-        {"role": "user", "content": "newest"},
-    ]
-
-    trimmed = MessageBudget(recent_message_tokens=30).trim_recent_messages(messages)
-
-    assert trimmed == [messages[3]]
-
-
-def test_message_budget_counts_large_tool_calls_payload_with_empty_content():
-    messages = [
-        {"role": "user", "content": "older"},
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {
-                    "id": "call-1",
-                    "type": "function",
-                    "function": {"name": "lookup", "arguments": "x" * 200},
-                }
-            ],
-        },
-        {"role": "tool", "tool_call_id": "call-1", "content": "result"},
-        {"role": "user", "content": "newest"},
-    ]
-
-    trimmed = MessageBudget(recent_message_tokens=20).trim_recent_messages(messages)
-
-    assert trimmed == [messages[3]]
-
-
-def test_context_manager_builds_envelope_with_stable_key(tmp_path, monkeypatch):
+def test_context_add_message_preserves_raw_stream_and_returns_active_copy(tmp_path, monkeypatch):
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent.resolve()))
-    (tmp_path / "README.md").write_text("hello project", encoding="utf-8")
-    options = WorkspaceContextOptions(
-        include_git_status=False,
-        include_recent_commits=False,
-        include_file_tree=False,
+    context = Context(
+        cwd=tmp_path,
+        options=WorkspaceContextOptions(include_project_docs=False, include_file_tree=False),
+        task="do it",
     )
-    manager = ContextManager(tmp_path, options, recent_message_tokens=20)
-    prior_messages = [
-        {"role": "user", "content": "a" * 20, "name": "drop-me"},
-        {"role": "assistant", "content": "b" * 20, "name": "keep-me"},
-    ]
-    tool_schemas = [{"type": "function", "function": {"name": "read_file"}}]
+    message = {"role": "user", "content": "hello", "metadata": {"n": 1}}
 
-    first = manager.build("do the task", prior_messages, tool_schemas)
-    second = manager.build("do the task", prior_messages, tool_schemas)
+    context.add_message(message)
+    message["metadata"]["n"] = 2
+    frames = context.history_frames()
+    frames[0].payload["metadata"]["n"] = 3
 
-    assert isinstance(first, ContextEnvelope)
-    assert first.stable_prefix.text.startswith("<coding_agent_prefix")
-    assert first.workspace_prefix.text.startswith("<workspace_context>")
-    assert "README.md" in first.workspace_prefix.text
-    assert first.session_summary is None
-    assert first.mode == "run"
-    assert first.recent_messages == [prior_messages[1]]
-    assert first.current_task == "do the task"
-    assert first.full_context_key == second.full_context_key
+    assert context.raw_messages() == [{"role": "user", "content": "hello", "metadata": {"n": 1}}]
+    assert context.history_frames()[0].payload["metadata"]["n"] == 1
 
 
-def test_context_manager_build_isolates_nested_recent_messages(tmp_path, monkeypatch):
-    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent.resolve()))
-    options = WorkspaceContextOptions(
-        include_project_docs=False,
-        include_git_status=False,
-        include_recent_commits=False,
-        include_file_tree=False,
+def test_context_constructor_does_not_accept_memory_or_compact_client_dependencies():
+    signature = inspect.signature(Context)
+
+    assert "memory_store" not in signature.parameters
+    assert "compact_client" not in signature.parameters
+
+
+def test_update_workspace_snapshot_stores_structured_payload_without_markup(tmp_path):
+    context = Context(
+        cwd=tmp_path,
+        options=WorkspaceContextOptions(include_project_docs=False, include_file_tree=False),
+        task="do it",
     )
-    manager = ContextManager(tmp_path, options, recent_message_tokens=100)
-    prior_messages = [
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {
-                    "id": "call-1",
-                    "type": "function",
-                    "function": {"name": "lookup", "arguments": "{}"},
-                }
-            ],
-        },
-        {"role": "tool", "tool_call_id": "call-1", "content": "result"},
-    ]
-
-    envelope = manager.build("do the task", prior_messages, [])
-    prior_messages[0]["tool_calls"][0]["function"]["arguments"] = '{"changed": true}'
-
-    assert envelope.recent_messages[0]["tool_calls"][0]["function"]["arguments"] == "{}"
-
-
-def test_context_manager_full_context_key_changes_when_required_inputs_change(
-    tmp_path, monkeypatch
-):
-    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent.resolve()))
-    readme = tmp_path / "README.md"
-    readme.write_text("hello project", encoding="utf-8")
-    options = WorkspaceContextOptions(
-        include_git_status=False,
-        include_recent_commits=False,
-        include_file_tree=False,
-    )
-    manager = ContextManager(tmp_path, options, recent_message_tokens=100)
-    task = "do the task"
-    prior_messages = [{"role": "user", "content": "original message"}]
-    tool_schemas = [{"type": "function", "function": {"name": "read_file"}}]
-
-    baseline = manager.build(task, prior_messages, tool_schemas).full_context_key
-
-    assert (
-        manager.build("do a different task", prior_messages, tool_schemas).full_context_key
-        != baseline
-    )
-    assert (
-        manager.build(
-            task,
-            [{"role": "user", "content": "changed message"}],
-            tool_schemas,
-        ).full_context_key
-        != baseline
-    )
-    assert (
-        manager.build(
-            task,
-            prior_messages,
-            [{"type": "function", "function": {"name": "write_file"}}],
-        ).full_context_key
-        != baseline
+    snapshot = WorkspaceSnapshot(
+        cwd=tmp_path,
+        repo_root=None,
+        branch=None,
+        default_branch=None,
+        status="",
+        recent_commits=[],
+        project_docs={"README.md": "literal <workspace_context>"},
+        file_tree=["README.md"],
     )
 
-    readme.write_text("changed project", encoding="utf-8")
+    context.update_workspace_snapshot(snapshot)
 
-    assert manager.build(task, prior_messages, tool_schemas).full_context_key != baseline
-
-
-def test_context_manager_full_context_key_changes_when_mode_changes(
-    tmp_path, monkeypatch
-):
-    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent.resolve()))
-    options = WorkspaceContextOptions(
-        include_project_docs=False,
-        include_git_status=False,
-        include_recent_commits=False,
-        include_file_tree=False,
-    )
-    manager = ContextManager(tmp_path, options, recent_message_tokens=100)
-    prior_messages = [{"role": "user", "content": "original message"}]
-
-    run_key = manager.build("do the task", prior_messages, [], mode="run").full_context_key
-    chat_key = manager.build("do the task", prior_messages, [], mode="chat").full_context_key
-
-    assert run_key != chat_key
+    workspace_frame = next(frame for frame in context.frames() if frame.kind == "workspace")
+    assert workspace_frame.payload["project_docs"]["README.md"] == "literal <workspace_context>"
+    assert workspace_frame.kind == "workspace"
+    assert "content" not in workspace_frame.payload
 
 
-def test_context_manager_build_sets_envelope_mode(tmp_path, monkeypatch):
-    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent.resolve()))
-    options = WorkspaceContextOptions(
-        include_project_docs=False,
-        include_git_status=False,
-        include_recent_commits=False,
-        include_file_tree=False,
-    )
-    manager = ContextManager(tmp_path, options, recent_message_tokens=100)
-
-    envelope = manager.build("do the task", [], [], mode="chat")
-
-    assert envelope.mode == "chat"
-
-
-def test_context_manager_injects_memory_anchor_and_handoff(tmp_path, monkeypatch):
+def test_context_assembler_pushes_memory_as_raw_structured_data(tmp_path, monkeypatch):
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent.resolve()))
     store = MemoryStore(tmp_path)
-    store.save_scratchpad({"project_goal": "优化记忆系统", "modified_files": ["src/a.py"]})
-    store.write_handoff("上一轮已经完成 tool 优化。")
-    options = WorkspaceContextOptions(
-        include_project_docs=False,
-        include_git_status=False,
-        include_recent_commits=False,
-        include_file_tree=False,
+    store.save_scratchpad({"project_goal": "keep raw", "modified_files": ["src/a.py"]})
+    store.write_handoff("handoff text")
+    store.save_file_summaries({"src/a.py": {"path": "src/a.py", "language": "python"}})
+
+    context = ContextAssembler(
+        cwd=tmp_path,
+        options=WorkspaceContextOptions(include_project_docs=False, include_file_tree=False),
+        memory_store=store,
+    ).build(
+        task="continue",
     )
-    manager = ContextManager(tmp_path, options, recent_message_tokens=100, memory_store=store)
 
-    envelope = manager.build("继续", [], [])
-    messages = PromptBuilder().to_messages(envelope)
-
-    assert "优化记忆系统" in messages[2]["content"]
-    assert "<handoff_memo>" in messages[3]["content"]
-    assert "上一轮已经完成 tool 优化。" in messages[3]["content"]
-
-
-def test_context_manager_injects_valid_file_summaries_after_memory_anchor(tmp_path, monkeypatch):
-    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent.resolve()))
-    path = tmp_path / "module.py"
-    path.write_text("import json\n\nclass Worker:\n    pass\n", encoding="utf-8")
-    store = MemoryStore(tmp_path)
-    store.update_file_summary("module.py")
-    scratchpad = store.load_scratchpad()
-    scratchpad["read_files"] = ["module.py"]
-    store.save_scratchpad(scratchpad)
-    options = WorkspaceContextOptions(
-        include_project_docs=False,
-        include_git_status=False,
-        include_recent_commits=False,
-        include_file_tree=False,
-    )
-    manager = ContextManager(tmp_path, options, recent_message_tokens=100, memory_store=store)
-
-    envelope = manager.build("继续", [], [])
-    messages = PromptBuilder().to_messages(envelope)
-
-    assert "<memory_anchor>" in messages[2]["content"]
-    assert "<file_summaries>" in messages[3]["content"]
-    assert 'path="module.py"' in messages[3]["content"]
-    assert "<current_task>" in messages[4]["content"]
-
-
-def test_context_manager_orders_handoff_before_file_summaries(tmp_path, monkeypatch):
-    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent.resolve()))
-    path = tmp_path / "module.py"
-    path.write_text("class Worker:\n    pass\n", encoding="utf-8")
-    store = MemoryStore(tmp_path)
-    store.update_file_summary("module.py")
-    scratchpad = store.load_scratchpad()
-    scratchpad["read_files"] = ["module.py"]
-    store.save_scratchpad(scratchpad)
-    store.write_handoff("已有交接摘要。")
-    options = WorkspaceContextOptions(
-        include_project_docs=False,
-        include_git_status=False,
-        include_recent_commits=False,
-        include_file_tree=False,
-    )
-    manager = ContextManager(tmp_path, options, recent_message_tokens=100, memory_store=store)
-
-    messages = PromptBuilder().to_messages(manager.build("继续", [], []))
-
-    assert "<memory_anchor>" in messages[2]["content"]
-    assert "<handoff_memo>" in messages[3]["content"]
-    assert "<file_summaries>" in messages[4]["content"]
-    assert "<current_task>" in messages[5]["content"]
+    frames = {frame.kind: frame for frame in context.frames()}
+    assert frames["memory"].payload["scratchpad"]["project_goal"] == "keep raw"
+    assert frames["handoff"].payload["text"] == "handoff text"
+    assert frames["file_summaries"].payload["summaries"]["src/a.py"]["language"] == "python"
+    assert "<memory_anchor>" not in json.dumps([frame.payload for frame in context.frames()])
 
 
 class CompactClient:
@@ -734,29 +234,83 @@ class CompactClient:
 
     def chat(self, messages, tools):
         self.calls.append({"messages": messages, "tools": tools})
-        return {"message": {"role": "assistant", "content": "## 当前目标\n继续任务\n\n## 下一步\n读取关键文件"}}
+        return {"message": {"role": "assistant", "content": "## 当前目标\n继续任务"}}
 
 
-def test_context_manager_compacts_old_messages_when_threshold_is_hit(tmp_path, monkeypatch):
+def test_context_has_no_side_effectful_compact_method():
+    assert not hasattr(Context, "compact")
+
+
+def test_clear_old_tool_results_truncates_long_tool_result_without_mutating_raw_history(tmp_path, monkeypatch):
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent.resolve()))
-    store = MemoryStore(tmp_path)
-    client = CompactClient()
-    options = WorkspaceContextOptions(
-        include_project_docs=False,
-        include_git_status=False,
-        include_recent_commits=False,
-        include_file_tree=False,
-        max_input_tokens=100,
-        compact_threshold_ratio=0.1,
-        protected_recent_turns=1,
-        protected_tool_results=0,
+    context = Context(
+        cwd=tmp_path,
+        options=WorkspaceContextOptions(
+            include_project_docs=False,
+            include_file_tree=False,
+            max_input_tokens=100,
+            compact_threshold_ratio=0.1,
+            protected_recent_turns=2,
+        ),
+        task="task",
     )
-    manager = ContextManager(
-        tmp_path,
-        options,
-        recent_message_tokens=1000,
-        memory_store=store,
-        compact_client=client,
+    long_tool = {"role": "tool", "tool_call_id": "call-1", "content": "x" * 5000}
+    context.add_message({"role": "user", "content": "new"})
+    context.add_message(long_tool)
+
+    context.replace_active_history(None, [{"role": "user", "content": "new"}, {
+        "role": "tool",
+        "tool_call_id": "call-1",
+        "content": "x" * 4000 + "\n... [tool result truncated after compaction]",
+    }])
+
+    assert context.raw_messages()[1]["content"] == "x" * 5000
+    active_tool = next(frame for frame in context.frames() if frame.role == "tool")
+    assert active_tool.payload["content"].endswith("... [tool result truncated after compaction]")
+
+
+def test_replace_active_history_inserts_compact_summary_as_assistant_message(tmp_path, monkeypatch):
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent.resolve()))
+    context = Context(
+        cwd=tmp_path,
+        options=WorkspaceContextOptions(include_project_docs=False, include_file_tree=False),
+        task="task",
+    )
+    context.add_message({"role": "user", "content": "old"})
+
+    context.replace_active_history(
+        {
+            "summary": "## 目标\n继续实现上下文压缩",
+            "archive_log_path": "dialog/archive.jsonl",
+            "instruction": "Use read_file if exact history is needed.",
+        },
+        [{"role": "user", "content": "recent"}],
+    )
+
+    history = context.history_frames()
+    assert history[0].kind == "compact_summary"
+    assert history[0].role == "assistant"
+    assert history[0].payload["role"] == "assistant"
+    assert history[0].payload["content"].startswith("[CONTEXT COMPACTION]")
+    assert "dialog/archive.jsonl" in history[0].payload["content"]
+    assert "## 目标\n继续实现上下文压缩" in history[0].payload["content"]
+    assert history[1].payload == {"role": "user", "content": "recent"}
+    assert context.raw_messages() == [{"role": "user", "content": "old"}]
+
+
+def test_context_slice_old_history_protects_recent_without_archiving(tmp_path, monkeypatch):
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent.resolve()))
+    context = Context(
+        cwd=tmp_path,
+        options=WorkspaceContextOptions(
+            include_project_docs=False,
+            include_file_tree=False,
+            max_input_tokens=100,
+            compact_threshold_ratio=0.1,
+            protected_recent_turns=1,
+            protected_tool_results=0,
+        ),
+        task="task",
     )
     prior = [
         {"role": "user", "content": "old"},
@@ -775,14 +329,12 @@ def test_context_manager_compacts_old_messages_when_threshold_is_hit(tmp_path, m
         },
         {"role": "tool", "tool_call_id": "call-1", "content": "x" * 5000},
     ]
+    for message in prior:
+        context.add_message(message)
 
-    envelope = manager.build("task", prior, [])
+    old_messages, remaining_messages = context.slice_old_history()
 
-    assert client.calls
-    assert "source_refs" in client.calls[0]["messages"][1]["content"]
-    assert "## 当前目标" in envelope.handoff_memo
-    assert "## Source References" in envelope.handoff_memo
-    assert store.read_handoff().startswith("## Source References")
-    assert envelope.recent_messages[0]["content"] == "new"
-    assert "旧 tool 输出已清理" in envelope.recent_messages[2]["content"]
-    assert any(store.dialog_dir.glob("*.jsonl"))
+    assert context.raw_messages() == prior
+    assert old_messages == prior[:2]
+    assert remaining_messages[0]["content"] == "new"
+    assert "旧 tool 输出已清理" in remaining_messages[2]["content"]

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 import ast
 import hashlib
+import json
 import re
 
 
@@ -112,6 +113,75 @@ def is_summary_valid(summary: dict[str, Any], path: Path) -> bool:
         return False
     content_hash = summary.get("content_hash")
     return isinstance(content_hash, str) and content_hash == file_hash(path)
+
+
+class FileSummaryStore:
+    def __init__(self, project_root: Path, memory_dir: Path) -> None:
+        self.project_root = project_root
+        self.memory_dir = memory_dir
+        self.path = memory_dir / "file_summaries.json"
+
+    def load(self) -> dict[str, dict[str, Any]]:
+        if not self.path.exists():
+            return {}
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return {
+            path: value
+            for path, value in data.items()
+            if isinstance(path, str) and isinstance(value, dict)
+        }
+
+    def save(self, summaries: dict[str, dict[str, Any]]) -> None:
+        self.memory_dir.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(
+            json.dumps(summaries, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    def update(self, path: str | Path) -> dict[str, Any] | None:
+        absolute = self._resolve_project_path(path)
+        if not absolute.is_file():
+            return None
+        summary = summarize_file(absolute, self.project_root.resolve()).to_dict()
+        summaries = self.load()
+        summaries[summary["path"]] = summary
+        self.save(summaries)
+        return summary
+
+    def invalidate(self, path: str | Path, reason: str) -> None:
+        relative = self._relative_project_path(path)
+        summaries = self.load()
+        summary = summaries.get(relative)
+        if summary is None:
+            summary = {
+                "path": relative,
+                "content_hash": "",
+                "language": "",
+                "imports": [],
+                "symbols": [],
+            }
+        summary["stale"] = True
+        summary["stale_reason"] = reason
+        summaries[relative] = summary
+        self.save(summaries)
+
+    def _resolve_project_path(self, path: str | Path) -> Path:
+        raw = Path(path)
+        if raw.is_absolute():
+            return raw.resolve()
+        return (self.project_root / raw).resolve()
+
+    def _relative_project_path(self, path: str | Path) -> str:
+        absolute = self._resolve_project_path(path)
+        try:
+            return absolute.relative_to(self.project_root.resolve()).as_posix()
+        except ValueError:
+            return Path(path).as_posix()
 
 
 def _summarize_python(text: str, lines: list[str]) -> tuple[list[str], list[SymbolSummary]]:

@@ -3,11 +3,11 @@ from rich.console import Console
 import pytest
 
 import coding_agent.cli as cli_module
-from coding_agent.agent import AgentResult
 from coding_agent.cli import RunTaskResult, app
 from coding_agent.config import ConfigError
-from coding_agent.context import UsageStats
+from coding_agent.context.context import UsageStats
 from coding_agent.interrupts import TaskInterrupted
+from coding_agent.orchestrator.agent_loop import AgentResult
 from coding_agent.runtime_events import RuntimeEvent
 from coding_agent.session import SessionStore
 

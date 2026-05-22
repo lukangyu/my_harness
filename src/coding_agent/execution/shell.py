@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from coding_agent.policy import CommandDecision, CommandPolicy
+from coding_agent.execution.policy import CommandDecision, CommandPolicy
 
 
 @dataclass(frozen=True)

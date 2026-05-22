@@ -3,13 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from coding_agent.agent import AgentLoop
 from coding_agent.interrupts import TaskInterrupted
-from coding_agent.memory import MemoryStore
+from coding_agent.memory.store import MemoryStore
+from coding_agent.orchestrator.agent_loop import AgentLoop
 from coding_agent.run_result import RunTaskResult
-from coding_agent.run_store import RunArtifact, RunStore, TaskState
 from coding_agent.session import SessionStore
-from coding_agent.telemetry import TelemetryLogger
+from coding_agent.telemetry.logger import TelemetryLogger
+from coding_agent.telemetry.store import RunArtifact, RunStore, TaskState
 
 
 class RunCoordinator:

@@ -2,13 +2,13 @@ import json
 
 import pytest
 
-from coding_agent.agent import AgentResult
 from coding_agent.interrupts import TaskInterrupted
-from coding_agent.memory import MemoryStore
-from coding_agent.run_coordinator import RunCoordinator
-from coding_agent.run_store import RunStore
+from coding_agent.memory.store import MemoryStore
+from coding_agent.orchestrator.agent_loop import AgentResult
+from coding_agent.orchestrator.coordinator import RunCoordinator
 from coding_agent.session import SessionStore
-from coding_agent.telemetry import TelemetryLogger
+from coding_agent.telemetry.logger import TelemetryLogger
+from coding_agent.telemetry.store import RunStore
 
 
 class FakeAgent:

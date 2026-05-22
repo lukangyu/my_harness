@@ -1,6 +1,6 @@
 import json
 
-from coding_agent.memory import MemoryStore
+from coding_agent.memory.store import MemoryStore
 
 
 def test_memory_store_records_file_tool_facts(tmp_path):

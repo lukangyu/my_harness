@@ -1,6 +1,6 @@
 import json
 
-from coding_agent.telemetry import TelemetryLogger, build_workspace_snapshot
+from coding_agent.telemetry.logger import TelemetryLogger, build_workspace_snapshot
 
 
 def read_jsonl(path):

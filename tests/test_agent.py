@@ -4,15 +4,15 @@ from pathlib import Path
 
 import httpx
 
-from coding_agent.agent import AgentLoop
-from coding_agent.context import UsageStats, WorkspaceContextOptions
+from coding_agent.context.context import UsageStats, WorkspaceContextOptions
+from coding_agent.execution.policy import CommandPolicy
+from coding_agent.execution.sandbox import WorkspaceSandbox
+from coding_agent.execution.shell import ShellRunner
+from coding_agent.execution.tools import create_default_tools
+from coding_agent.orchestrator.agent_loop import AgentLoop
 from coding_agent.runtime_events import RuntimeEvent
 from coding_agent.llm import LLMError, OpenAICompatibleClient
-from coding_agent.policy import CommandPolicy
-from coding_agent.sandbox import WorkspaceSandbox
 from coding_agent.session import SessionStore
-from coding_agent.shell import ShellRunner
-from coding_agent.tools import create_default_tools
 
 
 class FakeClient:
@@ -84,13 +84,15 @@ def test_agent_runs_tool_then_returns_final_answer(tmp_path):
     assert result.reached_max_steps is False
     assert (tmp_path / "notes.txt").read_text(encoding="utf-8") == "hello"
     assert client.calls[0]["messages"][0]["role"] == "system"
-    assert "<coding_agent_prefix" in client.calls[0]["messages"][0]["content"]
+    assert "You are coding-agent" in client.calls[0]["messages"][0]["content"]
     assert client.calls[0]["messages"][1]["role"] == "user"
-    assert "<workspace_context>" in client.calls[0]["messages"][1]["content"]
+    assert json.loads(client.calls[0]["messages"][1]["content"])["kind"] == "context"
     assert client.calls[0]["messages"][2]["role"] == "user"
-    assert "<current_task>" in client.calls[0]["messages"][2]["content"]
-    assert "mode: run" in client.calls[0]["messages"][2]["content"]
-    assert "write a note" in client.calls[0]["messages"][2]["content"]
+    assert json.loads(client.calls[0]["messages"][2]["content"]) == {
+        "kind": "current_task",
+        "mode": "run",
+        "content": "write a note",
+    }
     assert client.calls[1]["messages"][-1]["role"] == "tool"
     assert client.calls[1]["messages"][-1]["tool_call_id"] == "call_1"
     assert client.calls[1]["messages"][-1]["name"] == "write_file"
@@ -352,13 +354,12 @@ def test_agent_places_prior_messages_after_workspace_context(tmp_path):
     assert result.final_answer == "answer"
     messages = client.calls[0]["messages"]
     assert messages[0]["role"] == "system"
-    assert "<coding_agent_prefix" in messages[0]["content"]
+    assert "You are coding-agent" in messages[0]["content"]
     assert messages[1]["role"] == "user"
-    assert "<workspace_context>" in messages[1]["content"]
+    assert json.loads(messages[1]["content"])["kind"] == "context"
     assert messages[2] == {"role": "user", "content": "earlier"}
     assert messages[3]["role"] == "user"
-    assert "<current_task>" in messages[3]["content"]
-    assert "new task" in messages[3]["content"]
+    assert json.loads(messages[3]["content"])["content"] == "new task"
 
 
 def test_agent_result_conversation_messages_exclude_generated_prompt_blocks(tmp_path):
@@ -416,16 +417,22 @@ def test_agent_reuses_sanitized_conversation_without_duplicating_prompt_blocks(t
     )
 
     second_messages = second_client.calls[0]["messages"]
+    context_payload = json.loads(second_messages[1]["content"])
+    task_payload = json.loads(second_messages[-1]["content"])
     rendered = json.dumps(second_messages)
-    assert rendered.count("<coding_agent_prefix") == 1
-    assert rendered.count("<workspace_context>") == 1
-    assert rendered.count("<current_task>") == 1
+    assert rendered.count("You are coding-agent") == 1
+    assert context_payload["kind"] == "context"
+    assert task_payload["kind"] == "current_task"
     assert second_messages[2:] == [
         {"role": "user", "content": "first task"},
         {"role": "assistant", "content": "first"},
         {
             "role": "user",
-            "content": "<current_task>\nmode: chat\ncontent:\nsecond task\n</current_task>",
+            "content": json.dumps(
+                {"kind": "current_task", "mode": "chat", "content": "second task"},
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
         },
     ]
 
@@ -445,15 +452,18 @@ def test_agent_includes_workspace_context_for_empty_prior_messages(tmp_path):
 
     assert result.final_answer == "answer"
     assert client.calls[0]["messages"][0]["role"] == "system"
-    assert "<coding_agent_prefix" in client.calls[0]["messages"][0]["content"]
+    assert "You are coding-agent" in client.calls[0]["messages"][0]["content"]
     assert client.calls[0]["messages"][1]["role"] == "user"
-    assert "<workspace_context>" in client.calls[0]["messages"][1]["content"]
-    assert "README.md" in client.calls[0]["messages"][1]["content"]
-    assert "hello workspace" in client.calls[0]["messages"][1]["content"]
+    context_payload = json.loads(client.calls[0]["messages"][1]["content"])
+    assert context_payload["kind"] == "context"
+    assert "README.md" in json.dumps(context_payload)
+    assert "hello workspace" in json.dumps(context_payload)
     assert client.calls[0]["messages"][2]["role"] == "user"
-    assert "<current_task>" in client.calls[0]["messages"][2]["content"]
-    assert "mode: run" in client.calls[0]["messages"][2]["content"]
-    assert "new task" in client.calls[0]["messages"][2]["content"]
+    assert json.loads(client.calls[0]["messages"][2]["content"]) == {
+        "kind": "current_task",
+        "mode": "run",
+        "content": "new task",
+    }
 
 
 def test_agent_emits_runtime_event_for_prompt_context(tmp_path):

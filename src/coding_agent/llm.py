@@ -7,8 +7,8 @@ from typing import Any
 
 import httpx
 
-from coding_agent.context import UsageStats
-from coding_agent.telemetry import TelemetryLogger
+from coding_agent.context.context import UsageStats
+from coding_agent.telemetry.logger import TelemetryLogger
 
 
 class LLMError(RuntimeError):

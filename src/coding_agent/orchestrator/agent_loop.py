@@ -6,16 +6,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
-from coding_agent.context import (
-    ContextManager,
-    PromptBuilder,
-    UsageStats,
-    WorkspaceContextOptions,
-)
-from coding_agent.memory import MemoryStore
+from coding_agent.context.assembler import ContextAssembler
+from coding_agent.context.context import UsageStats, WorkspaceContextOptions
+from coding_agent.context.prompt_builder import PromptBuilder, create_default_prompt_builder
+from coding_agent.execution.executor import ToolExecutor
+from coding_agent.execution.tools import ToolRegistry
+from coding_agent.memory.store import MemoryStore
+from coding_agent.orchestrator.lifecycle import AgentLifecycleBus, AgentLifecycleHook, AgentTurnContext
 from coding_agent.runtime_events import RuntimeEvent
-from coding_agent.telemetry import TelemetryLogger
-from coding_agent.tools import ToolRegistry
+from coding_agent.telemetry.logger import TelemetryLogger
 
 
 class ChatClient(Protocol):
@@ -50,6 +49,9 @@ class AgentLoop:
         on_runtime_event: Callable[[RuntimeEvent], None] | None = None,
         telemetry: TelemetryLogger | None = None,
         memory_store: MemoryStore | None = None,
+        lifecycle_hooks: list[AgentLifecycleHook] | None = None,
+        prompt_builder: PromptBuilder | None = None,
+        context_assembler: ContextAssembler | None = None,
     ) -> None:
         self.client = client
         self.tools = tools
@@ -59,14 +61,25 @@ class AgentLoop:
         self.on_runtime_event = on_runtime_event
         self.telemetry = telemetry
         self.memory_store = memory_store
-        self.context_manager = ContextManager(
+        self.lifecycle_hooks = list(lifecycle_hooks or [])
+        self.lifecycle = AgentLifecycleBus(self.lifecycle_hooks)
+        self.cwd = cwd
+        self.context_options = context_options or WorkspaceContextOptions()
+        self.recent_message_tokens = recent_message_tokens
+        self.prompt_builder = prompt_builder or create_default_prompt_builder()
+        self.context_assembler = context_assembler or ContextAssembler(
             cwd=cwd,
-            options=context_options or WorkspaceContextOptions(),
-            recent_message_tokens=recent_message_tokens,
+            options=self.context_options,
             memory_store=memory_store,
-            compact_client=client,
         )
-        self.prompt_builder = PromptBuilder()
+        self.tool_executor = ToolExecutor(
+            tools,
+            lifecycle_hooks=self.lifecycle_hooks,
+            on_tool_call=on_tool_call,
+            on_runtime_event=on_runtime_event,
+            telemetry=telemetry,
+            memory_store=memory_store,
+        )
 
     def run(
         self,
@@ -77,7 +90,7 @@ class AgentLoop:
         self._event("agent.run.start", "AgentLoop 开始执行任务", "run", {"mode": mode, "task_length": len(task)})
         tool_schemas = self.tools.schemas()
         with self._span("构建上下文", "context", {"tool_count": len(tool_schemas)}):
-            envelope = self.context_manager.build(
+            context = self.context_assembler.build(
                 task=task,
                 prior_messages=list(prior_messages or []),
                 tool_schemas=tool_schemas,
@@ -88,9 +101,9 @@ class AgentLoop:
             "上下文构建完成",
             "context",
             {
-                "full_context_key": envelope.full_context_key,
-                "recent_messages": len(envelope.recent_messages),
-                "workspace_fingerprint": envelope.workspace_prefix.workspace_fingerprint,
+                "full_context_key": context.full_context_key(),
+                "recent_messages": len(context.history_frames()),
+                "workspace_fingerprint": context.workspace_snapshot.fingerprint(),
             },
         )
         self._runtime_event(
@@ -99,23 +112,42 @@ class AgentLoop:
                 message="上下文已组装",
                 metadata={
                     "tool_count": len(tool_schemas),
-                    "recent_messages": len(envelope.recent_messages),
-                    "memory_anchor": bool(envelope.memory_anchor),
-                    "handoff_memo": bool(envelope.handoff_memo),
-                    "file_summaries": bool(envelope.file_summaries),
+                    "recent_messages": len(context.history_frames()),
+                    "memory_anchor": any(frame.kind == "memory" for frame in context.context_frames()),
+                    "handoff_memo": any(frame.kind == "handoff" for frame in context.context_frames()),
+                    "file_summaries": any(frame.kind == "file_summaries" for frame in context.context_frames()),
                 },
             )
         )
-        with self._span("渲染 prompt messages", "prompt"):
-            messages = self.prompt_builder.to_messages(envelope, mode=mode)
-        conversation_messages = deepcopy(envelope.recent_messages)
-        conversation_messages.append({"role": "user", "content": envelope.current_task})
+        conversation_messages = context.raw_messages()
+        conversation_messages.append({"role": "user", "content": context.task})
+        current_turn_tail: list[dict[str, Any]] = []
+        messages: list[dict[str, Any]] = []
         usage: UsageStats | None = None
         attempts = 0
         tool_steps = 0
         last_tool: str | None = None
 
         for step in range(1, self.max_steps + 1):
+            turn_ctx = AgentTurnContext(
+                turn_index=step,
+                messages=[],
+                tool_schemas=tool_schemas,
+                context_entity=context,
+            )
+            self.lifecycle.on_turn_start(turn_ctx)
+            self.lifecycle.pre_llm(turn_ctx)
+            with self._span("渲染 prompt messages", "prompt"):
+                messages = self.prompt_builder.build_final_messages(context)
+            extra_messages = deepcopy(turn_ctx.messages)
+            current_task_message = _pop_current_task_message(messages)
+            if current_task_message is not None:
+                messages.extend(extra_messages)
+                messages.append(current_task_message)
+            else:
+                messages.extend(extra_messages)
+            messages.extend(deepcopy(current_turn_tail))
+            turn_ctx.messages = messages
             self._event(
                 "agent.step.start",
                 f"开始第 {step} 轮 AgentLoop",
@@ -124,6 +156,8 @@ class AgentLoop:
             )
             with self._span("调用大模型", "llm", {"step": step, "message_count": len(messages)}):
                 response = self.client.chat(messages, tool_schemas)
+            turn_ctx.llm_response = response
+            self.lifecycle.after_llm(turn_ctx)
             attempts += 1
             response_usage = response.get("usage")
             if response_usage is not None:
@@ -131,6 +165,7 @@ class AgentLoop:
             self._progress({"type": "model_attempt", "attempts": attempts, "step": step})
             assistant_message = response["message"]
             messages.append(assistant_message)
+            current_turn_tail.append(deepcopy(assistant_message))
             conversation_messages.append(deepcopy(assistant_message))
 
             tool_calls = assistant_message.get("tool_calls") or []
@@ -160,7 +195,7 @@ class AgentLoop:
 
             for tool_call in tool_calls:
                 with self._span("生成 tool message", "tool", {"step": step}):
-                    tool_message = self._tool_message(tool_call)
+                    tool_message = self.tool_executor.execute(tool_call, turn_ctx)
                 tool_steps += 1
                 last_tool = tool_message.get("name")
                 self._progress(
@@ -172,7 +207,9 @@ class AgentLoop:
                     }
                 )
                 messages.append(tool_message)
+                current_turn_tail.append(deepcopy(tool_message))
                 conversation_messages.append(deepcopy(tool_message))
+            self.lifecycle.on_turn_end(turn_ctx)
 
         self._event("agent.max_steps", "AgentLoop 达到最大步数后停止", "run", {"max_steps": self.max_steps})
         return AgentResult(
@@ -186,62 +223,6 @@ class AgentLoop:
             last_tool=last_tool,
             stop_reason="max_steps",
         )
-
-    def _tool_message(self, tool_call: dict[str, Any]) -> dict[str, Any]:
-        if self.on_tool_call is not None:
-            self.on_tool_call(tool_call)
-        function = tool_call.get("function", {})
-        name = function.get("name", "")
-        raw_arguments = function.get("arguments") or "{}"
-        if self.telemetry is not None:
-            self.telemetry.event(
-                "agent.tool_message.start",
-                f"开始处理模型请求的工具调用 {name}",
-                function="AgentLoop._tool_message",
-                phase="tool",
-                metadata={"tool": name, "arguments_length": len(raw_arguments)},
-            )
-        try:
-            arguments = json.loads(raw_arguments)
-            if not isinstance(arguments, dict):
-                raise ValueError("tool arguments must be a JSON object")
-            result = self.tools.call(name, arguments)
-        except (json.JSONDecodeError, ValueError) as exc:
-            result = {"ok": False, "error": f"Invalid JSON arguments: {exc}"}
-        self._runtime_event(
-            RuntimeEvent(
-                type="tool.result",
-                message=f"工具 {name} 执行完成",
-                metadata=_tool_result_metadata(name, result),
-            )
-        )
-        tool_content = json.dumps(result, ensure_ascii=False)
-        if self.memory_store is not None:
-            offload = self.memory_store.offload_tool_result(tool=name, content=tool_content)
-            tool_content = offload["content"]
-            if offload.get("offloaded") and self.telemetry is not None:
-                self.telemetry.event(
-                    "tool.result.offload",
-                    f"工具 {name} 的长输出已转存到文件",
-                    function="AgentLoop._tool_message",
-                    phase="tool",
-                    metadata={"tool": name, "path": offload.get("path"), "original_chars": offload.get("original_chars")},
-                )
-        if self.telemetry is not None:
-            self.telemetry.event(
-                "agent.tool_message.end",
-                f"工具调用 {name} 的 tool message 已生成",
-                function="AgentLoop._tool_message",
-                phase="tool",
-                metadata={"tool": name, "ok": result.get("ok"), "content_length": len(tool_content)},
-            )
-
-        return {
-            "role": "tool",
-            "tool_call_id": tool_call.get("id", ""),
-            "name": name,
-            "content": tool_content,
-        }
 
     def _event(self, event: str, message_zh: str, phase: str, metadata: dict[str, Any] | None = None) -> None:
         if self.telemetry is None:
@@ -276,23 +257,19 @@ class _NullSpan:
         return False
 
 
-def _tool_result_metadata(tool: str, result: dict[str, Any]) -> dict[str, Any]:
-    metadata: dict[str, Any] = {
-        "tool": tool,
-        "ok": result.get("ok"),
-    }
-    if result.get("ok") is False:
-        metadata["error"] = result.get("error") or result.get("stderr") or "工具执行失败"
-    for key in ("path", "exit_code", "timed_out"):
-        if key in result:
-            metadata[key] = result[key]
-    if "changed_files" in result:
-        changed_files = result.get("changed_files") or []
-        metadata["changed_files_count"] = len(changed_files) if isinstance(changed_files, list) else 0
-    if "matches" in result:
-        matches = result.get("matches") or []
-        metadata["matches_count"] = len(matches) if isinstance(matches, list) else 0
-    if "files" in result:
-        files = result.get("files") or []
-        metadata["files_count"] = len(files) if isinstance(files, list) else 0
-    return metadata
+def _pop_current_task_message(messages: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not messages:
+        return None
+    last_message = messages[-1]
+    content = last_message.get("content")
+    if last_message.get("role") != "user" or not isinstance(content, str):
+        return None
+    if "<current_task" in content:
+        return messages.pop()
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(payload, dict) and payload.get("kind") == "current_task":
+        return messages.pop()
+    return None

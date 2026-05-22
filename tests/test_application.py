@@ -1,6 +1,5 @@
 from pathlib import Path
 
-from coding_agent.agent import AgentResult
 from coding_agent.application import Application
 from coding_agent.config import (
     AgentConfig,
@@ -10,6 +9,7 @@ from coding_agent.config import (
     ModelConfig,
     WorkspaceConfig,
 )
+from coding_agent.orchestrator.agent_loop import AgentResult
 from coding_agent.run_result import RunTaskResult
 
 

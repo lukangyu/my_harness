@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from coding_agent.agent import AgentResult
+from coding_agent.orchestrator.agent_loop import AgentResult
 
 
 @dataclass(frozen=True)

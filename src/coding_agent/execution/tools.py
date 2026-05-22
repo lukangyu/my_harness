@@ -10,10 +10,8 @@ import subprocess
 import time
 from typing import Any
 
-from coding_agent.memory import MemoryStore
-from coding_agent.sandbox import WorkspaceSandbox
-from coding_agent.shell import ShellRunner
-from coding_agent.telemetry import TelemetryLogger
+from coding_agent.execution.sandbox import WorkspaceSandbox
+from coding_agent.execution.shell import ShellRunner
 
 
 ToolFunc = Callable[[dict[str, Any]], dict[str, Any]]
@@ -28,7 +26,7 @@ DEFAULT_IGNORED_DIRS = {
     ".coding-agent",
 }
 DEFAULT_LIST_MAX_ENTRIES = 200
-DEFAULT_READ_MAX_CHARS = 20_000
+DEFAULT_READ_MAX_CHARS = 50_000
 DEFAULT_SEARCH_MAX_MATCHES = 100
 
 
@@ -41,14 +39,8 @@ class Tool:
 
 
 class ToolRegistry:
-    def __init__(
-        self,
-        telemetry: TelemetryLogger | None = None,
-        memory_store: MemoryStore | None = None,
-    ) -> None:
+    def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
-        self.telemetry = telemetry
-        self.memory_store = memory_store
 
     def register(
         self,
@@ -78,70 +70,16 @@ class ToolRegistry:
             return {"ok": False, "error": f"Unknown tool: {name}"}
 
         try:
-            if self.telemetry is None:
-                result = tool.func(arguments)
-                if self.memory_store is not None:
-                    self.memory_store.record_tool_result(tool=name, arguments=arguments, result=result)
-                return result
-            safe_arguments = _summarize_tool_arguments(arguments)
-            with self.telemetry.span(
-                f"工具调用 {name}",
-                function="ToolRegistry.call",
-                phase="tool",
-                metadata={"tool": name, "arguments": safe_arguments},
-            ):
-                self.telemetry.event(
-                    "tool.call",
-                    f"开始调用工具 {name}",
-                    function="ToolRegistry.call",
-                    phase="tool",
-                    metadata={"tool": name, "arguments": safe_arguments},
-                )
-                result = tool.func(arguments)
-                if self.memory_store is not None:
-                    self.memory_store.record_tool_result(tool=name, arguments=arguments, result=result)
-                self.telemetry.event(
-                    "tool.result",
-                    f"工具 {name} 执行完成",
-                    function="ToolRegistry.call",
-                    phase="tool",
-                    metadata={
-                        "tool": name,
-                        "ok": result.get("ok"),
-                        "result": _summarize_tool_result(result),
-                    },
-                )
-                self.telemetry.workspace_snapshot(
-                    message_zh=f"工具 {name} 执行后的 workspace 快照",
-                    function="ToolRegistry.call",
-                    phase="workspace_after_tool",
-                )
-                return result
+            return tool.func(arguments)
         except Exception as exc:
-            if self.memory_store is not None:
-                self.memory_store.record_tool_result(
-                    tool=name,
-                    arguments=arguments,
-                    result={"ok": False, "error": str(exc)},
-                )
-            if self.telemetry is not None:
-                self.telemetry.event(
-                    "tool.error",
-                    f"工具 {name} 执行失败：{exc}",
-                    function="ToolRegistry.call",
-                    phase="tool",
-                    metadata={"tool": name, "error": str(exc)},
-                )
             return {"ok": False, "error": str(exc)}
 
 
 def create_default_tools(
     sandbox: WorkspaceSandbox,
     shell: ShellRunner,
-    telemetry: TelemetryLogger | None = None,
-    memory_store: MemoryStore | None = None,
 ) -> ToolRegistry:
-    registry = ToolRegistry(telemetry=telemetry, memory_store=memory_store)
+    registry = ToolRegistry()
 
     def list_files(arguments: dict[str, Any]) -> dict[str, Any]:
         root = sandbox.resolve(arguments.get("path", "."))
@@ -173,16 +111,29 @@ def create_default_tools(
     def read_file(arguments: dict[str, Any]) -> dict[str, Any]:
         path = sandbox.resolve(arguments["path"])
         start_line = _positive_int(arguments.get("start_line"), 1)
-        line_count = _optional_positive_int(arguments.get("line_count"))
+        end_line = _optional_positive_int(arguments.get("end_line"))
+        if end_line is not None and end_line < start_line:
+            raise ValueError("end_line must be greater than or equal to start_line")
         max_chars = _positive_int(arguments.get("max_chars"), DEFAULT_READ_MAX_CHARS)
         lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
         start_index = min(start_line - 1, len(lines))
-        end_index = len(lines) if line_count is None else min(start_index + line_count, len(lines))
-        content = "".join(lines[start_index:end_index])
-        truncated = end_index < len(lines)
+        requested_end_index = len(lines) if end_line is None else min(end_line, len(lines))
+        content = "".join(lines[start_index:requested_end_index])
+        truncated = False
         if len(content) > max_chars:
             content = content[:max_chars]
             truncated = True
+        returned_newlines = content.count("\n")
+        ends_mid_line = bool(content) and not content.endswith("\n")
+        end_index = min(start_index + returned_newlines + (1 if ends_mid_line else 0), len(lines))
+        next_start_line = end_index if truncated and ends_mid_line else end_index + 1 if truncated else None
+        if next_start_line is not None:
+            next_start_line = min(max(next_start_line, start_line), len(lines))
+        notice = (
+            f"Output truncated at {max_chars} chars. Continue with start_line={next_start_line}."
+            if truncated and next_start_line is not None
+            else None
+        )
         return {
             "ok": True,
             "path": sandbox.relative_path(path),
@@ -193,6 +144,8 @@ def create_default_tools(
                 "total_lines": len(lines),
                 "returned_chars": len(content),
                 "truncated": truncated,
+                "next_start_line": next_start_line,
+                "notice": notice,
             },
         }
 
@@ -273,7 +226,7 @@ def create_default_tools(
             properties={
                 "path": {"type": "string"},
                 "start_line": {"type": "integer", "default": 1},
-                "line_count": {"type": "integer"},
+                "end_line": {"type": "integer"},
                 "max_chars": {"type": "integer", "default": DEFAULT_READ_MAX_CHARS},
             },
             required=["path"],

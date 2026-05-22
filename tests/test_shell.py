@@ -1,9 +1,9 @@
 import subprocess
 import sys
 
-from coding_agent.policy import CommandPolicy
-from coding_agent import shell
-from coding_agent.shell import ShellRunner
+from coding_agent.execution.policy import CommandPolicy
+from coding_agent.execution import shell
+from coding_agent.execution.shell import ShellRunner
 
 
 def test_rejects_unlisted_command_without_executing(tmp_path):
