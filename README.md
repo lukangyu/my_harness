@@ -1,95 +1,161 @@
 # coding-agent
 
-`coding-agent` is a Python CLI for running a local AI coding assistant against a
-project workspace. It uses an OpenAI-compatible chat completions endpoint, gives
-the model a small set of file and shell tools, and keeps file access and command
-execution inside explicit project-level boundaries.
+`coding-agent` 是一个面向本地代码仓库的 AI 编程助手 CLI。它通过 OpenAI-compatible `/chat/completions` 接口调用模型，把文件读写、文本搜索、补丁应用和命令执行包装成受控工具，并用明确的工作区沙箱和命令策略约束所有副作用。
 
-This repository is an MVP. The implementation is intentionally small so the
-agent loop, tool protocol, configuration, command policy, and safety checks are
-easy to inspect.
+项目当前重点是把 Agent 运行时拆成清晰的领域模块：编排、上下文、工具执行、记忆、观测分别负责自己的边界，避免工具函数、Prompt 组装和持久化逻辑互相穿透。
 
-## Current MVP capabilities
+完整架构说明见：[docs/architecture.md](docs/architecture.md)。
 
-- Installable command: `coding-agent`.
-- Project-local configuration in `.coding-agent/config.toml`.
-- One-shot task mode with `coding-agent run "..."`.
-- Interactive REPL mode with `coding-agent chat`.
-- Chat resume from a saved session with `coding-agent chat --resume PATH` or
-  `coding-agent chat --resume-latest`.
-- OpenAI-compatible model calls through `/chat/completions`.
-- Tool calls for listing files, reading UTF-8 files, writing UTF-8 files,
-  searching text, and running allowed commands.
-- Workspace sandboxing for all file tool paths.
-- Configurable allow and deny lists for shell commands.
-- Context management with a stable prompt prefix, workspace baseline, and
-  budgeted recent conversation history.
-- Sanitized session logs written to `.coding-agent/sessions/`.
+## 当前能力
 
-## Project structure
+- 可安装命令：`coding-agent`
+- 项目本地配置：`.coding-agent/config.toml`
+- 一次性任务：`coding-agent run "..."`
+- 交互式聊天：`coding-agent chat`
+- 从保存的 session 恢复聊天：`coding-agent chat --resume PATH` 或 `--resume-latest`
+- OpenAI-compatible Chat Completions 调用
+- 内置工具：
+  - `list_files`
+  - `read_file`
+  - `write_file`
+  - `search_text`
+  - `apply_patch`
+  - `run_shell`
+- 文件工具路径受 `WorkspaceSandbox` 限制
+- Shell 命令受 allow/deny 策略和审批回调限制
+- ContextFrame 结构化上下文管线
+- pre-LLM 上下文压缩与 dialog archive
+- 长工具输出执行期 offload
+- 工具结果投影到 memory scratchpad / tool index
+- run 级 telemetry、trace、events、debug payload
+- sanitized session 保存到 `.coding-agent/sessions/`
+
+## 项目结构
 
 ```text
 src/coding_agent/
-  agent.py      Main agent loop and tool-call handling.
-  cli.py        Typer commands: init, run, and chat.
-  config.py     TOML config loading, validation, and environment lookup.
-  context.py    Prompt prefixes, workspace context, message budgeting, usage stats.
-  llm.py        OpenAI-compatible chat completions client.
-  policy.py     Shell command allow/deny policy.
-  sandbox.py    Workspace path resolution and boundary checks.
-  session.py    JSON session log writer and resume loader.
-  shell.py      Policy-gated subprocess execution.
-  tools.py      Tool registry and built-in tool implementations.
+  cli.py            CLI 命令：init、run、chat
+  config.py         TOML 配置读取、校验、环境变量解析
+  application.py    运行时依赖装配
+  llm.py            OpenAI-compatible Chat Completions 客户端
+  session.py        JSON session 保存与恢复
+  run_result.py     run 返回对象
+  runtime_events.py CLI/UI 运行事件
 
-tests/          Unit and CLI smoke tests for the MVP behavior.
-docs/plans/     Design notes and implementation plans.
+  orchestrator/     RunCoordinator、AgentLoop、生命周期 Hook
+  context/          ContextFrame、WorkspaceSnapshot、PromptBuilder
+  execution/        ToolRegistry、ToolExecutor、Sandbox、Shell、Policy
+  memory/           Scratchpad、Handoff、ToolIndex、DialogArchive、FileSummary
+  hooks/            ContextCompactionHook、MemoryProjectionHook
+  telemetry/        RunStore、TelemetryLogger
+
+tests/              单元测试与 CLI smoke tests
+docs/               架构文档和设计计划
 ```
 
-## How the agent works
+## 运行流程
 
-1. `coding-agent run` or `coding-agent chat` loads
-   `.coding-agent/config.toml` from the current working directory.
-2. The CLI builds a `WorkspaceSandbox`, `CommandPolicy`, `ShellRunner`,
-   `ToolRegistry`, model client, and `AgentLoop`.
-3. The context manager builds each request from a stable system prefix, a
-   workspace context block, budgeted recent messages, and the current task.
-4. The agent sends that prompt and the tool schemas to the configured
-   OpenAI-compatible endpoint.
-5. If the model returns tool calls, the agent validates and dispatches them
-   through the local tool registry.
-6. Tool results are appended to the reusable conversation history as tool
-   messages.
-7. The loop continues until the model returns a final answer or `max_steps` is
-   reached.
-8. Sanitized conversation history is saved as JSON under
-   `.coding-agent/sessions/`. Generated prompt blocks such as workspace context
-   and current task wrappers are not saved.
+一次 `coding-agent run` 或 chat 中的一轮请求大致如下：
 
-## Context management
+```text
+CLI
+  -> Application 装配依赖
+  -> RunCoordinator 创建 run 工件
+  -> AgentLoop 构建 Context
+  -> pre_llm hooks 检查是否需要压缩
+  -> PromptBuilder 生成 messages
+  -> LLM 返回 assistant 消息或 tool_calls
+  -> ToolExecutor 执行工具
+  -> after_tool hooks 投影记忆
+  -> 循环直到最终答案或 max_steps
+```
 
-Each model request is assembled in this order:
+其中：
 
-1. Stable system prefix: behavior, safety, tool, and response rules. This block
-   has a local `prompt_cache_key` and stays byte-stable while the prompt version
-   and tool schemas do not change.
-2. Workspace context: current directory, repository root, branch, default
-   branch, git status, recent commits, a clipped file tree, and clipped project
-   docs such as `AGENTS.md`, `README.md`, `pyproject.toml`, and `package.json`.
-   This block has a fingerprint so it can be reused until workspace inputs
-   change.
-3. Dynamic context: recent saved conversation messages and the current task.
-   The full context key also includes the run mode (`run` or `chat`).
+- `Application` 只负责装配。
+- `RunCoordinator` 负责 run 生命周期和报告落盘。
+- `AgentLoop` 负责 LLM-Tool 状态机。
+- `ToolRegistry` 只负责工具注册和路由，不写 memory/telemetry。
+- `Context` 只保存结构化 frame，不直接读取 MemoryStore。
+- `PromptBuilder` 是唯一最终消息工厂。
 
-Recent conversation history is trimmed with an approximate token budget. Oldest
-messages are dropped first, assistant tool-call groups stay together with their
-tool results, and oversized tool-result content is truncated while preserving
-tool metadata.
+## 上下文管理
 
-## Configuration
+每次请求模型时，消息按固定顺序构建：
 
-Run `coding-agent init` to create `.coding-agent/config.toml`.
+```text
+system: 固定规训和工具使用边界
+user: workspace / memory / handoff / file summaries
+assistant/user/tool: active history
+user: current task
+```
 
-Example:
+`Context` 内部保存两条历史：
+
+- `_raw_frames`：完整原始历史，不因压缩被破坏。
+- `_active_frames`：当前送入模型的历史子集。
+
+当估算输入超过阈值时，`ContextCompactionHook` 会在 `pre_llm` 阶段：
+
+1. 保护最近若干轮消息。
+2. 将旧消息归档到 `.coding-agent/runs/<run_id>/dialog/*.jsonl`。
+3. 调用压缩模型生成摘要。
+4. 把摘要作为 assistant 消息放回对话流。
+
+摘要形态类似：
+
+```text
+[CONTEXT COMPACTION] Earlier turns were compacted.
+
+Archive: dialog/2026-05-22-xxxx.jsonl
+
+## 目标
+...
+
+## 进度
+...
+
+## 下一步
+...
+```
+
+工具结果的长输出不由压缩 Hook 处理，而是在 `ToolExecutor` 生成 tool message 时立即 offload 到：
+
+```text
+.coding-agent/runs/<run_id>/tool_result/*.txt
+```
+
+## Memory 与 Session
+
+`session.py` 保存可恢复聊天记录：
+
+```text
+.coding-agent/sessions/*.json
+```
+
+这些记录用于 `chat --resume`，不会包含生成的 workspace context 或 current task wrapper。
+
+`memory/` 保存长期运行状态：
+
+```text
+.coding-agent/memory/
+  scratchpad.json
+  handoff.md
+  tool_index.jsonl
+  file_summaries.json
+```
+
+当前 memory 主要记录工具事实、文件摘要、已知问题和 handoff。完整对话仍主要通过 session 保存；后续可以继续扩展 `session_search`、decision log 和 session memory 投影。
+
+## 配置
+
+运行初始化：
+
+```bash
+coding-agent init
+```
+
+示例配置：
 
 ```toml
 [model]
@@ -124,98 +190,53 @@ deny = [
 
 [context]
 max_input_tokens = 24000
-reserved_output_tokens = 4000
-recent_message_tokens = 12000
-project_context_tokens = 4000
+compact_threshold_ratio = 0.8
+protected_recent_turns = 4
+protected_tool_results = 6
 doc_max_chars = 1200
 tree_max_entries = 200
 include_project_docs = true
 include_file_tree = true
 include_git_status = true
 include_recent_commits = true
-restore_last_session = false
 show_cache_stats = true
 ```
 
-Meaning:
-
-- `model.base_url`: Base URL for an OpenAI-compatible API. The client posts to
-  `{base_url}/chat/completions`.
-- `model.api_key_env`: Environment variable that contains the API key.
-- `model.model`: Model name sent in the chat completions request.
-- `agent.max_steps`: Maximum model/tool iterations before the agent stops.
-- `agent.stream`: Reserved configuration flag. The current client does not
-  stream responses.
-- `workspace.root`: Root directory for file tools and shell command working
-  directory. Relative paths are resolved from the project root.
-- `commands.allow`: Exact command or command-prefix rules that may run.
-- `commands.deny`: Exact command or command-prefix rules that are blocked before
-  allow rules are considered.
-- `context.max_input_tokens`: Reserved for total input budgeting. Current
-  trimming is controlled by `context.recent_message_tokens`.
-- `context.reserved_output_tokens`: Reserved output budget for future total
-  context calculations.
-- `context.recent_message_tokens`: Approximate-token budget for reusable recent
-  conversation messages.
-- `context.project_context_tokens`: Reserved for workspace/project context
-  budgeting.
-- `context.doc_max_chars`: Maximum characters read from each whitelisted project
-  document.
-- `context.tree_max_entries`: Maximum file paths included in the workspace file
-  tree.
-- `context.include_project_docs`: Include clipped high-value project docs in the
-  workspace context.
-- `context.include_file_tree`: Include a clipped file tree in the workspace
-  context.
-- `context.include_git_status`: Include `git status --short` output when inside
-  a git repository.
-- `context.include_recent_commits`: Include up to five recent commits when
-  inside a git repository.
-- `context.restore_last_session`: Reserved flag. Use `chat --resume-latest` to
-  resume explicitly.
-- `context.show_cache_stats`: Print cache hit percentage when the model response
-  includes both input token count and cached input token count.
-
-Set the configured API key before running the agent:
+设置 API key：
 
 ```bash
 export OPENAI_API_KEY="..."
 ```
 
-PowerShell:
+PowerShell：
 
 ```powershell
 $env:OPENAI_API_KEY = "..."
 ```
 
-## Commands
+## 命令
 
 ### `coding-agent init`
 
-Creates `.coding-agent/config.toml` in the target project.
+创建 `.coding-agent/config.toml`。
 
 ```bash
 coding-agent init
 coding-agent init --path /path/to/project
 ```
 
-If the config already exists, the command leaves it in place.
-
 ### `coding-agent run`
 
-Runs one task and exits.
+执行一次任务并退出。
 
 ```bash
-coding-agent run "inspect the project and summarize it"
-coding-agent run "run the tests and explain the failures"
+coding-agent run "检查项目结构并总结"
+coding-agent run "运行测试并解释失败原因"
 ```
-
-The command prints the final answer and the path to the saved session log.
 
 ### `coding-agent chat`
 
-Starts an interactive session. Conversation state is kept across turns until it
-is cleared or the process exits.
+启动交互式会话。
 
 ```bash
 coding-agent chat
@@ -223,112 +244,98 @@ coding-agent chat --resume .coding-agent/sessions/20260513-120000-000000.json
 coding-agent chat --resume-latest
 ```
 
-Slash commands:
+Slash commands：
 
-- `/exit`: Quit chat mode.
-- `/clear`: Clear the current conversation history.
-- `/status`: Print the number of messages currently in memory.
+- `/exit`：退出 chat
+- `/clear`：清空当前对话历史
+- `/status`：打印当前消息数量
 
-`--resume PATH` loads validated conversation messages from a specific saved
-session. `--resume-latest` loads the newest JSON session under
-`.coding-agent/sessions/` for the current working directory. Resume options
-restore sanitized conversation history only; generated prompt blocks are
-recreated for the current workspace on each request.
+## 内置工具
 
-## Usage and cache stats
+### `list_files`
 
-The OpenAI-compatible client records usage metadata when the provider returns
-it. The CLI prints a line such as:
+列出工作区路径下的文件。
 
-```text
-Cache: 85% cached input tokens
-```
+常用参数：
 
-This display depends on `context.show_cache_stats = true` and a response usage
-payload that includes both input tokens and cached input tokens. Supported fields
-include OpenAI-style `prompt_tokens` with
-`prompt_tokens_details.cached_tokens`, and compatible `input_tokens` plus
-`cached_tokens`. If those fields are absent, no cache line is printed.
+- `path = "."`
+- `max_entries = 200`
+- `max_depth`
 
-## Safety model
+### `read_file`
 
-### Workspace sandbox
+读取 UTF-8 文件。
 
-All file tools resolve paths through `WorkspaceSandbox`. Relative paths are
-resolved under `workspace.root`; absolute paths must still be inside that root.
-Parent traversal such as `../outside.txt` is rejected. Tool results use
-workspace-relative POSIX-style paths.
+支持：
 
-The built-in file tools are:
+- `path`
+- `start_line`
+- `end_line`
+- `max_chars = 50000`
 
-- `list_files(path=".")`
-- `read_file(path)`
-- `write_file(path, content)`
-- `search_text(query, path=".")`
+大文件会自动截断，并在 metadata 里返回 `next_start_line`，提示下一次从哪里继续读。
 
-`write_file` can create parent directories and writes UTF-8 text.
+### `write_file`
 
-### Command policy
+写入 UTF-8 文件，可自动创建父目录。
 
-Shell commands go through `CommandPolicy` before execution.
+### `search_text`
 
-- Deny rules are checked first and take precedence.
-- Allow rules are checked after deny rules.
-- Rules match either the full command or a prefix followed by a space.
-- Commands not matched by the allow list are rejected.
-- Shell control operators are rejected before allow matching.
+搜索文本或正则。优先使用 `rg`，不可用时回退到 Python 遍历。
 
-Rejected control syntax includes newlines, `&&`, `||`, `;`, `&`, `|`, `>`, `<`,
-command substitution with `$()`, and backticks.
+### `apply_patch`
 
-### Shell execution constraints
+应用 OpenAI-style patch，支持 add/delete/update/move。
 
-Allowed commands are parsed into an argv list and executed with
-`subprocess.run(..., shell=False)`. The runner captures stdout, stderr, exit
-code, and timeout status. The default timeout is 120 seconds.
+### `run_shell`
 
-The runner resolves the executable from `PATH` and refuses to execute a
-workspace-local executable. This prevents a project file such as `pytest.bat`
-from being run just because a bare command like `pytest` is allowed.
+通过 `CommandPolicy` 和 `ShellRunner` 执行命令。默认 `shell=False`，拒绝 shell 控制操作符和未授权命令。
 
-## Development setup
+## 安全模型
 
-Requirements:
+### 工作区沙箱
 
-- Python 3.11 or newer.
+所有文件工具都通过 `WorkspaceSandbox` 解析路径：
 
-Install the package in editable mode with test dependencies:
+- 相对路径基于 `workspace.root`
+- 绝对路径也必须在 workspace 内
+- `../outside.txt` 会被拒绝
+
+### 命令策略
+
+Shell 命令执行前会经过：
+
+1. deny 规则
+2. shell 控制操作符检查
+3. allow 规则
+4. 审批回调
+
+未命中 allow 的命令会被拒绝。
+
+## 开发
+
+安装开发依赖：
 
 ```bash
 python -m pip install -e ".[dev]"
 ```
 
-Run the tests:
+运行测试：
 
 ```bash
 python -m pytest -q
 ```
 
-Useful verification commands for this repository:
+本仓库常用验证命令：
 
 ```bash
-python -m pytest -q --basetemp=.pytest-readme-agent
-git diff -- README.md
+.\.venv\Scripts\python.exe -m pytest -q --basetemp=.tmp-pytest
 ```
 
-## Current limitations and non-goals
+## 当前限制
 
-- `apply_patch` is registered as a tool name but is explicitly unsupported in
-  the MVP and always returns an error.
-- Streaming is configured but not implemented by the model client.
-- There is no automatic summary compression, long-term memory, or fact
-  extraction.
-- Context budgeting uses an approximate token estimate, not a model tokenizer.
-- The workspace context is a clipped orientation aid, not a full repository
-  index or semantic retrieval system.
-- There is no multi-agent execution.
-- There is no full-screen TUI.
-- The CLI only loads `.coding-agent/config.toml` from the current working
-  directory.
-- File access outside `workspace.root` is not supported.
-- Shell commands outside the configured policy are not supported.
+- memory 里已有 handoff 读取链路，但压缩摘要写回 handoff 还可以继续加强。
+- 完整历史搜索工具 `session_search` 尚未实现。
+- 决策日志和用户偏好提取尚未实现。
+- token 预算目前使用近似字符估算，不是模型 tokenizer。
+- 当前 CLI 仍是简单命令行界面，没有全屏 TUI。
