@@ -7,7 +7,7 @@ from coding_agent.interrupts import TaskInterrupted
 from coding_agent.memory.store import MemoryStore
 from coding_agent.orchestrator.agent_loop import AgentLoop
 from coding_agent.run_result import RunTaskResult
-from coding_agent.session import SessionStore
+from coding_agent.session import SessionRuntime
 from coding_agent.telemetry.logger import TelemetryLogger
 from coding_agent.telemetry.store import RunArtifact, RunStore, TaskState
 
@@ -21,14 +21,14 @@ class RunCoordinator:
         task_state: TaskState,
         telemetry: TelemetryLogger,
         memory_store: MemoryStore,
-        session_store: SessionStore,
+        session_runtime: SessionRuntime,
     ) -> None:
         self.run_store = run_store
         self.run_artifact = run_artifact
         self.task_state = task_state
         self.telemetry = telemetry
         self.memory_store = memory_store
-        self.session_store = session_store
+        self.session_runtime = session_runtime
 
     def run(
         self,
@@ -67,7 +67,11 @@ class RunCoordinator:
                 phase="workspace_after_task",
                 root=workspace_root,
             )
-            session_path = self.session_store.save(result.conversation_messages)
+            self.session_runtime.store.save_session_messages(
+                self.session_runtime.current,
+                result.conversation_messages,
+            )
+            session_path = self.session_runtime.current.session_path
             self.task_state.status = "completed"
             self.task_state.attempts = result.attempts
             self.task_state.tool_steps = result.tool_steps
@@ -95,7 +99,14 @@ class RunCoordinator:
                     "reached_max_steps": result.reached_max_steps,
                 },
             )
-            return RunTaskResult(result, session_path, show_cache_stats, self.run_artifact.run_id, self.run_artifact.run_dir)
+            return RunTaskResult(
+                result,
+                session_path,
+                show_cache_stats,
+                self.run_artifact.run_id,
+                self.run_artifact.run_dir,
+                self.session_runtime.current.conversation_path,
+            )
         except TaskInterrupted:
             self.task_state.status = "interrupted"
             self.task_state.stop_reason = "user_interrupt"

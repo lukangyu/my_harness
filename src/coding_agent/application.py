@@ -20,7 +20,7 @@ from coding_agent.orchestrator.coordinator import RunCoordinator
 from coding_agent.orchestrator.lifecycle import AgentLifecycleHook
 from coding_agent.run_result import RunTaskResult
 from coding_agent.runtime_events import RuntimeEvent
-from coding_agent.session import SessionStore
+from coding_agent.session import ConversationStore, SessionRef, SessionRuntime
 from coding_agent.telemetry.logger import TelemetryLogger
 from coding_agent.telemetry.store import RunStore
 
@@ -54,9 +54,14 @@ class Application:
         task: str,
         prior_messages: list[dict] | None,
         mode: str,
+        session_ref: SessionRef | None = None,
+        conversation_store: ConversationStore | None = None,
     ) -> RunTaskResult:
         sandbox = WorkspaceSandbox(self.config.workspace.root)
-        run_store = RunStore(self.config.project_root)
+        conversation_store = conversation_store or ConversationStore(self.config.project_root)
+        session_ref = session_ref or conversation_store.start_conversation()
+        session_runtime = SessionRuntime(store=conversation_store, current=session_ref)
+        run_store = RunStore(self.config.project_root, runs_root=session_ref.runs_dir)
         run_artifact, task_state = run_store.start_run(
             task=task,
             mode=mode,
@@ -69,6 +74,7 @@ class Application:
         )
         memory_store = MemoryStore(
             self.config.project_root,
+            memory_dir=session_ref.memory_dir,
             dialog_dir=run_artifact.dialog_dir,
             tool_result_dir=run_artifact.tool_result_dir,
         )
@@ -79,10 +85,9 @@ class Application:
             tools,
             sandbox,
             [
-                self.config.project_root / ".coding-agent" / "memory",
-                self.config.project_root / ".coding-agent" / "sessions",
-                self.config.project_root / ".coding-agent" / "runs",
+                session_ref.conversation_dir / "sessions",
             ],
+            current_session_root=session_ref.session_dir,
         )
         client = OpenAICompatibleClient(
             base_url=self.config.model.base_url,
@@ -99,7 +104,7 @@ class Application:
             task_state=task_state,
             telemetry=telemetry,
             memory_store=memory_store,
-            session_store=SessionStore(self.config.project_root, telemetry=telemetry),
+            session_runtime=session_runtime,
         )
         agent = AgentLoop(
             client=client,
@@ -124,6 +129,7 @@ class Application:
                 *self.lifecycle_hooks,
             ],
             prompt_builder=create_default_prompt_builder(),
+            session_runtime=session_runtime,
         )
         return coordinator.run(
             agent=agent,
@@ -150,6 +156,4 @@ def _context_options(config: AppConfig) -> WorkspaceContextOptions:
         protected_tool_results=config.context.protected_tool_results,
         handoff_max_chars=config.context.handoff_max_chars,
         scratchpad_max_chars=config.context.scratchpad_max_chars,
-        file_summaries_max_count=config.context.file_summaries_max_count,
-        file_summaries_max_chars=config.context.file_summaries_max_chars,
     )

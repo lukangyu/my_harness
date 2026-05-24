@@ -14,6 +14,7 @@ from coding_agent.execution.tools import ToolRegistry
 from coding_agent.memory.store import MemoryStore
 from coding_agent.orchestrator.lifecycle import AgentLifecycleBus, AgentLifecycleHook, AgentTurnContext
 from coding_agent.runtime_events import RuntimeEvent
+from coding_agent.session import SessionRuntime
 from coding_agent.telemetry.logger import TelemetryLogger
 
 
@@ -52,6 +53,7 @@ class AgentLoop:
         lifecycle_hooks: list[AgentLifecycleHook] | None = None,
         prompt_builder: PromptBuilder | None = None,
         context_assembler: ContextAssembler | None = None,
+        session_runtime: SessionRuntime | None = None,
     ) -> None:
         self.client = client
         self.tools = tools
@@ -72,6 +74,7 @@ class AgentLoop:
             options=self.context_options,
             memory_store=memory_store,
         )
+        self.session_runtime = session_runtime
         self.tool_executor = ToolExecutor(
             tools,
             lifecycle_hooks=self.lifecycle_hooks,
@@ -115,7 +118,6 @@ class AgentLoop:
                     "recent_messages": len(context.history_frames()),
                     "memory_anchor": any(frame.kind == "memory" for frame in context.context_frames()),
                     "handoff_memo": any(frame.kind == "handoff" for frame in context.context_frames()),
-                    "file_summaries": any(frame.kind == "file_summaries" for frame in context.context_frames()),
                 },
             )
         )
@@ -134,6 +136,7 @@ class AgentLoop:
                 messages=[],
                 tool_schemas=tool_schemas,
                 context_entity=context,
+                session_runtime=self.session_runtime,
             )
             self.lifecycle.on_turn_start(turn_ctx)
             self.lifecycle.pre_llm(turn_ctx)

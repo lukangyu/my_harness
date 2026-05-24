@@ -242,7 +242,7 @@ def test_session_search_registers_schema_without_default_tool_dependency(tmp_pat
 
     properties = schema["function"]["parameters"]["properties"]
     assert schema["function"]["description"] == "Search archived agent memory, sessions, and run artifacts."
-    assert set(properties) == {"query", "case_sensitive", "regex", "glob", "max_matches", "sources"}
+    assert set(properties) == {"query", "case_sensitive", "regex", "glob", "max_matches", "scope", "sources"}
     assert schema["function"]["parameters"]["required"] == ["query"]
 
 
@@ -335,7 +335,7 @@ def test_session_search_filters_sources_and_limits_results(tmp_path, monkeypatch
         }
     ]
     assert result["metadata"]["truncated"] is True
-    assert result["metadata"]["searched_roots"] == [".coding-agent/memory"]
+    assert result["metadata"]["searched_roots"] == [".coding-agent/memory", ".coding-agent/runs"]
 
 
 def test_session_search_sees_memory_root_created_after_registration(tmp_path, monkeypatch):
@@ -355,6 +355,31 @@ def test_session_search_sees_memory_root_created_after_registration(tmp_path, mo
             "path": ".coding-agent/memory/handoff.md",
             "line": 1,
             "text": "late decision",
+        }
+    ]
+
+
+def test_session_search_scope_current_session_excludes_other_sessions(tmp_path, monkeypatch):
+    tools = make_tools(tmp_path)
+    sessions_root = tmp_path / ".coding-agent" / "conversations" / "c1" / "sessions"
+    current = sessions_root / "s2"
+    old = sessions_root / "s1"
+    (current / "memory").mkdir(parents=True)
+    (old / "memory").mkdir(parents=True)
+    (current / "memory" / "handoff.md").write_text("needle current\n", encoding="utf-8")
+    (old / "memory" / "handoff.md").write_text("needle old\n", encoding="utf-8")
+    register_session_search_tool(tools, WorkspaceSandbox(tmp_path), [sessions_root], current_session_root=current)
+    monkeypatch.setattr("coding_agent.execution.tools.shutil.which", lambda name: None)
+
+    result = tools.call("session_search", {"query": "needle", "scope": "current_session"})
+
+    assert result["ok"] is True
+    assert result["matches"] == [
+        {
+            "source": "memory",
+            "path": ".coding-agent/conversations/c1/sessions/s2/memory/handoff.md",
+            "line": 1,
+            "text": "needle current",
         }
     ]
 

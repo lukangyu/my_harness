@@ -286,8 +286,10 @@ def register_session_search_tool(
     registry: ToolRegistry,
     sandbox: WorkspaceSandbox,
     roots: list[Path],
+    current_session_root: Path | None = None,
 ) -> None:
     candidate_roots = [sandbox.resolve(root) for root in roots]
+    current_session = sandbox.resolve(current_session_root) if current_session_root is not None else None
 
     def session_search(arguments: dict[str, Any]) -> dict[str, Any]:
         query = arguments["query"]
@@ -296,10 +298,14 @@ def register_session_search_tool(
         glob = arguments.get("glob")
         max_matches = _positive_int(arguments.get("max_matches"), DEFAULT_SESSION_SEARCH_MAX_MATCHES)
         sources = _session_search_sources(arguments.get("sources"))
+        scope = arguments.get("scope", "current_conversation")
+        if scope not in {"current_session", "current_conversation"}:
+            raise ValueError("scope must be current_session or current_conversation")
+        root_pool = [current_session] if scope == "current_session" and current_session is not None else candidate_roots
         selected_roots = [
             root
-            for root in candidate_roots
-            if root.exists() and (sources is None or _session_source_for_path(sandbox.relative_path(root)) in sources)
+            for root in root_pool
+            if root is not None and root.exists()
         ]
         searched_roots = [sandbox.relative_path(root) for root in selected_roots]
 
@@ -311,6 +317,7 @@ def register_session_search_tool(
             use_regex=use_regex,
             glob=glob,
             max_matches=max_matches,
+            sources=sources,
         )
         if rg_result is not None:
             rg_result["metadata"]["searched_roots"] = searched_roots
@@ -324,6 +331,7 @@ def register_session_search_tool(
             use_regex=use_regex,
             glob=glob,
             max_matches=max_matches,
+            sources=sources,
         )
         result["metadata"]["searched_roots"] = searched_roots
         return result
@@ -338,6 +346,11 @@ def register_session_search_tool(
                 "regex": {"type": "boolean", "default": False},
                 "glob": {"type": "string"},
                 "max_matches": {"type": "integer", "default": DEFAULT_SESSION_SEARCH_MAX_MATCHES},
+                "scope": {
+                    "type": "string",
+                    "enum": ["current_session", "current_conversation"],
+                    "default": "current_conversation",
+                },
                 "sources": {
                     "type": "array",
                     "items": {"type": "string", "enum": sorted(SESSION_SEARCH_SOURCE_NAMES)},
@@ -358,6 +371,7 @@ def _session_search_with_python(
     use_regex: bool,
     glob: Any,
     max_matches: int,
+    sources: set[str] | None,
 ) -> dict[str, Any]:
     matches: list[dict[str, Any]] = []
     matcher = _compile_matcher(query, case_sensitive=case_sensitive, use_regex=use_regex)
@@ -375,9 +389,12 @@ def _session_search_with_python(
 
             for line_number, line in enumerate(lines, start=1):
                 if matcher(line):
+                    source = _session_source_for_path(relative)
+                    if sources is not None and source not in sources:
+                        continue
                     matches.append(
                         {
-                            "source": _session_source_for_path(relative),
+                            "source": source,
                             "path": relative,
                             "line": line_number,
                             "text": line,
@@ -418,6 +435,7 @@ def _session_search_with_rg(
     use_regex: bool,
     glob: Any,
     max_matches: int,
+    sources: set[str] | None,
 ) -> dict[str, Any] | None:
     rg = shutil.which("rg")
     if rg is None:
@@ -453,9 +471,12 @@ def _session_search_with_rg(
                 continue
             absolute_match_path = (root / match_path).resolve()
             relative = sandbox.relative_path(absolute_match_path)
+            source = _session_source_for_path(relative)
+            if sources is not None and source not in sources:
+                continue
             matches.append(
                 {
-                    "source": _session_source_for_path(relative),
+                    "source": source,
                     "path": relative,
                     "line": line_number,
                     "text": text,

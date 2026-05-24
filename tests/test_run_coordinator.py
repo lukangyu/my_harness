@@ -6,7 +6,7 @@ from coding_agent.interrupts import TaskInterrupted
 from coding_agent.memory.store import MemoryStore
 from coding_agent.orchestrator.agent_loop import AgentResult
 from coding_agent.orchestrator.coordinator import RunCoordinator
-from coding_agent.session import SessionStore
+from coding_agent.session import ConversationStore, SessionRuntime
 from coding_agent.telemetry.logger import TelemetryLogger
 from coding_agent.telemetry.store import RunStore
 
@@ -25,7 +25,9 @@ class FakeAgent:
 
 
 def make_coordinator(tmp_path, task="inspect", mode="run"):
-    run_store = RunStore(tmp_path)
+    conversation_store = ConversationStore(tmp_path)
+    session_ref = conversation_store.start_conversation()
+    run_store = RunStore(tmp_path, runs_root=session_ref.runs_dir)
     artifact, state = run_store.start_run(task=task, mode=mode, workspace_root=tmp_path)
     telemetry = TelemetryLogger(artifact.run_dir, workspace_root=tmp_path, run_id=artifact.run_id)
     memory_store = MemoryStore(
@@ -39,7 +41,7 @@ def make_coordinator(tmp_path, task="inspect", mode="run"):
         task_state=state,
         telemetry=telemetry,
         memory_store=memory_store,
-        session_store=SessionStore(tmp_path, telemetry=telemetry),
+        session_runtime=SessionRuntime(conversation_store, session_ref),
     )
     return coordinator, artifact
 

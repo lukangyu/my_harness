@@ -59,9 +59,9 @@ class TaskState:
 
 
 class RunStore:
-    def __init__(self, project_root: Path | str) -> None:
+    def __init__(self, project_root: Path | str, *, runs_root: Path | str | None = None) -> None:
         self.project_root = Path(project_root)
-        self.runs_dir = self.project_root / ".coding-agent" / "runs"
+        self.runs_dir = Path(runs_root) if runs_root is not None else self.project_root / ".coding-agent" / "runs"
         self.index_path = self.runs_dir / "index.jsonl"
 
     def start_run(self, *, task: str, mode: str, workspace_root: Path | str) -> tuple[RunArtifact, TaskState]:

@@ -13,3 +13,4 @@ class RunTaskResult:
     show_cache_stats: bool
     run_id: str | None = None
     run_dir: Path | None = None
+    conversation_path: Path | None = None

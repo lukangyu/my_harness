@@ -87,8 +87,6 @@ deny = []
     assert config.context.protected_tool_results == 6
     assert config.context.handoff_max_chars == 6000
     assert config.context.scratchpad_max_chars == 4000
-    assert config.context.file_summaries_max_count == 8
-    assert config.context.file_summaries_max_chars == 8000
 
 
 def test_load_config_reads_context_overrides(tmp_path, monkeypatch):
@@ -132,8 +130,6 @@ protected_recent_turns = 2
 protected_tool_results = 3
 handoff_max_chars = 1200
 scratchpad_max_chars = 800
-file_summaries_max_count = 5
-file_summaries_max_chars = 1500
 """,
         encoding="utf-8",
     )
@@ -158,8 +154,6 @@ file_summaries_max_chars = 1500
     assert config.context.protected_tool_results == 3
     assert config.context.handoff_max_chars == 1200
     assert config.context.scratchpad_max_chars == 800
-    assert config.context.file_summaries_max_count == 5
-    assert config.context.file_summaries_max_chars == 1500
 
 
 def test_load_config_reports_missing_file(tmp_path):

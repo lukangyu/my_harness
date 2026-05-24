@@ -211,7 +211,6 @@ def test_context_assembler_pushes_memory_as_raw_structured_data(tmp_path, monkey
     store = MemoryStore(tmp_path)
     store.save_scratchpad({"project_goal": "keep raw", "modified_files": ["src/a.py"]})
     store.write_handoff("handoff text")
-    store.save_file_summaries({"src/a.py": {"path": "src/a.py", "language": "python"}})
 
     context = ContextAssembler(
         cwd=tmp_path,
@@ -224,7 +223,7 @@ def test_context_assembler_pushes_memory_as_raw_structured_data(tmp_path, monkey
     frames = {frame.kind: frame for frame in context.frames()}
     assert frames["memory"].payload["scratchpad"]["project_goal"] == "keep raw"
     assert frames["handoff"].payload["text"] == "handoff text"
-    assert frames["file_summaries"].payload["summaries"]["src/a.py"]["language"] == "python"
+    assert "file_summaries" not in frames
     assert "<memory_anchor>" not in json.dumps([frame.payload for frame in context.frames()])
 
 

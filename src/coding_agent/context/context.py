@@ -52,8 +52,6 @@ class WorkspaceContextOptions:
     protected_tool_results: int = 6
     handoff_max_chars: int = 6000
     scratchpad_max_chars: int = 4000
-    file_summaries_max_count: int = 8
-    file_summaries_max_chars: int = 8000
 
 
 class CompactClient(Protocol):
@@ -195,7 +193,6 @@ class Context:
         workspace_snapshot: WorkspaceSnapshot | None = None,
         scratchpad: dict[str, Any] | None = None,
         handoff: str = "",
-        file_summaries: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         self.cwd = cwd
         self.options = options
@@ -205,7 +202,6 @@ class Context:
         self.workspace_snapshot = workspace_snapshot or WorkspaceSnapshot.build(cwd, options)
         self.scratchpad = deepcopy(scratchpad or {})
         self.handoff = handoff
-        self.file_summaries = deepcopy(file_summaries or {})
         self._raw_frames: list[ContextFrame] = []
         self._active_frames: list[ContextFrame] = []
         self._static_frames: list[ContextFrame] = []
@@ -316,16 +312,6 @@ class Context:
                     stability="medium",
                 )
             )
-        if self.file_summaries:
-            frames.append(
-                self._frame(
-                    kind="file_summaries",
-                    role=None,
-                    payload={"summaries": self.file_summaries},
-                    priority=75,
-                    stability="medium",
-                )
-            )
         self._static_frames = frames
 
     def _estimate_total_tokens(self, history_messages: list[dict[str, Any]]) -> int:
@@ -422,7 +408,7 @@ def partition_messages(
         if prepared.get("role") == "tool":
             protected_tool_count += 1
             if protected_tool_count > protected_tool_results:
-                prepared["content"] = "[旧 tool 输出已清理，关键结论见 handoff_memo 或 tool_index.jsonl]"
+                prepared["content"] = "[旧 tool 输出已清理，关键结论见 handoff_memo 或 trace.jsonl]"
             protected.append(prepared)
             continue
         protected.append(prepared)
@@ -440,7 +426,7 @@ def partition_messages(
         if prepared.get("role") == "tool":
             protected_tool_count += 1
             if protected_tool_count > protected_tool_results:
-                prepared["content"] = "[旧 tool 输出已清理，关键结论见 handoff_memo 或 tool_index.jsonl]"
+                prepared["content"] = "[旧 tool 输出已清理，关键结论见 handoff_memo 或 trace.jsonl]"
         protected.append(prepared)
     return MessagePartitions(compactable=deepcopy(messages[:cutoff]), reserved=protected)
 
@@ -467,12 +453,12 @@ def _align_history_cutoff(messages: list[dict[str, Any]], cutoff: int) -> int:
 
 def _find_parent_assistant_cutoff(
     messages: list[dict[str, Any]],
-    tool_index: int,
+    tool_message_index: int,
     tool_call_id: Any | None = None,
 ) -> int | None:
     if tool_call_id is None:
-        tool_call_id = messages[tool_index].get("tool_call_id")
-    for index in range(tool_index - 1, -1, -1):
+        tool_call_id = messages[tool_message_index].get("tool_call_id")
+    for index in range(tool_message_index - 1, -1, -1):
         candidate = messages[index]
         if candidate.get("role") == "assistant" and _assistant_calls_tool(candidate, tool_call_id):
             return index

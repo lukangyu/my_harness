@@ -9,7 +9,7 @@ from coding_agent.context.context import UsageStats
 from coding_agent.interrupts import TaskInterrupted
 from coding_agent.orchestrator.agent_loop import AgentResult
 from coding_agent.runtime_events import RuntimeEvent
-from coding_agent.session import SessionStore
+from coding_agent.session import ConversationStore, SessionStore
 
 
 def test_run_task_delegates_to_application(monkeypatch):
@@ -163,11 +163,13 @@ def test_chat_reuses_conversation_messages(monkeypatch):
 def test_chat_resume_path_reports_loaded_message_count(tmp_path, monkeypatch):
     runner = CliRunner()
     calls = []
-    session_path = tmp_path / "session.json"
-    session_path.write_text(
-        '[{"role": "user", "content": "earlier"}, {"role": "assistant", "content": "answer"}]',
-        encoding="utf-8",
+    store = ConversationStore(tmp_path)
+    session = store.start_conversation()
+    store.save_session_messages(
+        session,
+        [{"role": "user", "content": "earlier"}, {"role": "assistant", "content": "answer"}],
     )
+    monkeypatch.chdir(tmp_path)
 
     def run_task(task, prior_messages, mode):
         calls.append({"task": task, "prior_messages": list(prior_messages), "mode": mode})
@@ -187,7 +189,7 @@ def test_chat_resume_path_reports_loaded_message_count(tmp_path, monkeypatch):
 
     monkeypatch.setattr(cli_module, "_run_task", run_task)
 
-    result = runner.invoke(app, ["chat", "--resume", str(session_path)], input="/status\nnext\n/exit\n")
+    result = runner.invoke(app, ["chat", "--resume", str(session.conversation_dir)], input="/status\nnext\n/exit\n")
 
     assert result.exit_code == 0
     assert "Messages: 2" in result.output
@@ -205,10 +207,9 @@ def test_chat_resume_path_reports_loaded_message_count(tmp_path, monkeypatch):
 
 def test_chat_resume_latest_reports_loaded_message_count(tmp_path, monkeypatch):
     runner = CliRunner()
-    store = SessionStore(tmp_path)
-    store.sessions_dir.mkdir(parents=True)
-    latest = store.sessions_dir / "20260513-120000-000002.json"
-    latest.write_text('[{"role": "user", "content": "latest"}]', encoding="utf-8")
+    store = ConversationStore(tmp_path)
+    session = store.start_conversation()
+    store.save_session_messages(session, [{"role": "user", "content": "latest"}])
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli_module, "_run_task", lambda task, prior_messages, mode: None)
 
@@ -218,15 +219,15 @@ def test_chat_resume_latest_reports_loaded_message_count(tmp_path, monkeypatch):
     assert "Messages: 1" in result.output
 
 
-def test_chat_invalid_resume_exits_with_error(tmp_path):
+def test_chat_legacy_flat_resume_exits_with_clear_error(tmp_path):
     runner = CliRunner()
     session_path = tmp_path / "session.json"
-    session_path.write_text('{"role": "user"}', encoding="utf-8")
+    session_path.write_text('[{"role": "user", "content": "earlier"}]', encoding="utf-8")
 
     result = runner.invoke(app, ["chat", "--resume", str(session_path)], input="/status\n")
 
     assert result.exit_code == 1
-    assert "Error:" in result.output
+    assert "legacy flat session files are no longer supported" in result.output
 
 
 def test_chat_resume_and_resume_latest_conflict_exits_with_error(tmp_path):
@@ -344,7 +345,6 @@ def test_runtime_event_printer_renders_prompt_context(monkeypatch):
             metadata={
                 "memory_anchor": True,
                 "handoff_memo": True,
-                "file_summaries": True,
                 "recent_messages": 3,
                 "tool_count": 6,
             },
@@ -355,7 +355,6 @@ def test_runtime_event_printer_renders_prompt_context(monkeypatch):
     assert "context" in output
     assert "memory" in output
     assert "handoff" in output
-    assert "file summaries" in output
     assert "recent=3" in output
 
 

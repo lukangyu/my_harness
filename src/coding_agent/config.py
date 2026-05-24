@@ -56,8 +56,6 @@ class ContextConfig:
     protected_tool_results: int = 6
     handoff_max_chars: int = 6000
     scratchpad_max_chars: int = 4000
-    file_summaries_max_count: int = 8
-    file_summaries_max_chars: int = 8000
 
 
 @dataclass(frozen=True)
@@ -207,18 +205,6 @@ def load_config(project_root: Path) -> AppConfig:
             "scratchpad_max_chars",
             context_defaults.scratchpad_max_chars,
             "context.scratchpad_max_chars",
-        ),
-        file_summaries_max_count=_optional_int(
-            context_data,
-            "file_summaries_max_count",
-            context_defaults.file_summaries_max_count,
-            "context.file_summaries_max_count",
-        ),
-        file_summaries_max_chars=_optional_int(
-            context_data,
-            "file_summaries_max_chars",
-            context_defaults.file_summaries_max_chars,
-            "context.file_summaries_max_chars",
         ),
     )
 

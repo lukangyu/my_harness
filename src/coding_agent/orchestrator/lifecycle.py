@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from coding_agent.context.context import Context
+from coding_agent.session import SessionRuntime
 
 
 @dataclass
@@ -14,6 +15,7 @@ class AgentTurnContext:
     messages: list[dict[str, Any]] = field(default_factory=list)
     tool_schemas: list[dict[str, Any]] = field(default_factory=list)
     context_entity: Context | None = None
+    session_runtime: SessionRuntime | None = None
     llm_payload: dict[str, Any] = field(default_factory=dict)
     llm_response: dict[str, Any] | None = None
     input_tokens: int = 0

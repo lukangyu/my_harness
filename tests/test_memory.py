@@ -20,7 +20,19 @@ def test_memory_store_records_file_tool_facts(tmp_path):
     scratchpad = store.load_scratchpad()
     assert scratchpad["modified_files"] == ["notes.txt"]
     assert scratchpad["read_files"] == ["notes.txt"]
-    assert store.tool_index_path.exists()
+
+
+def test_memory_store_uses_injected_memory_dir(tmp_path):
+    memory_dir = tmp_path / ".coding-agent" / "conversations" / "c1" / "sessions" / "s1" / "memory"
+    store = MemoryStore(tmp_path, memory_dir=memory_dir)
+
+    store.write_handoff("handoff")
+    store.save_scratchpad({"active_todos": ["continue"]})
+
+    assert store.memory_dir == memory_dir
+    assert (memory_dir / "handoff.md").read_text(encoding="utf-8").strip() == "handoff"
+    assert json.loads((memory_dir / "scratchpad.json").read_text(encoding="utf-8"))["active_todos"] == ["continue"]
+    assert not (tmp_path / ".coding-agent" / "memory").exists()
 
 
 def test_memory_store_records_shell_failure_as_known_issue(tmp_path):
@@ -50,63 +62,17 @@ def test_memory_anchor_renders_json_block(tmp_path):
     assert json.loads(anchor.removeprefix("<memory_anchor>\n").removesuffix("\n</memory_anchor>"))["modified_files"] == ["a.py"]
 
 
-def test_memory_store_updates_and_renders_valid_file_summary(tmp_path):
-    path = tmp_path / "module.py"
-    path.write_text("import json\n\nclass Worker:\n    pass\n", encoding="utf-8")
+def test_memory_store_does_not_create_file_summary_or_tool_index_cache(tmp_path):
     store = MemoryStore(tmp_path)
-
-    summary = store.update_file_summary("module.py")
-    rendered = store.render_file_summaries(
-        candidate_paths=["module.py"],
-        max_count=8,
-        max_chars=4000,
-    )
-
-    assert summary is not None
-    assert "<file_summaries>" in rendered
-    assert 'path="module.py"' in rendered
-    assert "class Worker" in rendered
-
-
-def test_memory_store_does_not_render_stale_or_hash_mismatched_summary(tmp_path):
-    path = tmp_path / "module.py"
-    path.write_text("class Worker:\n    pass\n", encoding="utf-8")
-    store = MemoryStore(tmp_path)
-    store.update_file_summary("module.py")
-
-    path.write_text("class Changed:\n    pass\n", encoding="utf-8")
-    rendered = store.render_file_summaries(
-        candidate_paths=["module.py"],
-        max_count=8,
-        max_chars=4000,
-    )
-    summaries = store.load_file_summaries()
-
-    assert rendered == ""
-    assert summaries["module.py"]["stale"] is True
-
-
-def test_memory_store_invalidates_summary_after_write_and_patch_results(tmp_path):
-    path = tmp_path / "module.py"
-    path.write_text("class Worker:\n    pass\n", encoding="utf-8")
-    store = MemoryStore(tmp_path)
-    store.update_file_summary("module.py")
 
     store.record_tool_result(
         tool="write_file",
         arguments={"path": "module.py"},
         result={"ok": True, "path": "module.py"},
     )
-    assert store.load_file_summaries()["module.py"]["stale_reason"] == "written"
 
-    path.write_text("class Worker:\n    pass\n", encoding="utf-8")
-    store.update_file_summary("module.py")
-    store.record_tool_result(
-        tool="apply_patch",
-        arguments={"patch": "..."},
-        result={"ok": True, "changed_files": ["module.py"]},
-    )
-    assert store.load_file_summaries()["module.py"]["stale_reason"] == "patched"
+    assert not (store.memory_dir / "file_summaries.json").exists()
+    assert not (store.memory_dir / "tool_index.jsonl").exists()
 
 
 def test_memory_store_archives_dialog_messages_as_jsonl(tmp_path):

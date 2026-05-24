@@ -11,6 +11,7 @@ from coding_agent.hooks.memory_hook import MemoryProjectionHook
 from coding_agent.memory.store import MemoryStore
 from coding_agent.orchestrator.agent_loop import AgentLoop
 from coding_agent.orchestrator.lifecycle import AgentLifecycleHook, AgentTurnContext
+from coding_agent.session import ConversationStore, SessionRuntime
 
 
 class FakeClient:
@@ -173,6 +174,54 @@ def test_context_compaction_hook_writes_structured_summary_to_handoff(tmp_path, 
     assert "## 目标\n继续任务" in compacted_message["content"]
 
 
+def test_context_compaction_hook_rotates_session_and_carries_scratchpad(tmp_path, monkeypatch):
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent.resolve()))
+    conversation_store = ConversationStore(tmp_path)
+    session = conversation_store.start_conversation()
+    (session.memory_dir / "scratchpad.json").write_text('{"active_todos":["next file"]}', encoding="utf-8")
+    store = MemoryStore(tmp_path, memory_dir=session.memory_dir)
+    compact_client = FakeClient([{"message": {"role": "assistant", "content": "## 目标\n继续任务"}}])
+    hook = ContextCompactionHook(memory_store=store, compact_client=compact_client)
+    client = FakeClient([{"message": {"role": "assistant", "content": "answer"}}])
+    runtime = SessionRuntime(conversation_store, session)
+    agent = AgentLoop(
+        client,
+        make_tools(tmp_path),
+        max_steps=1,
+        cwd=tmp_path,
+        context_options=WorkspaceContextOptions(
+            include_project_docs=False,
+            include_file_tree=False,
+            include_git_status=False,
+            include_recent_commits=False,
+            max_input_tokens=80,
+            compact_threshold_ratio=0.1,
+            protected_recent_turns=1,
+        ),
+        lifecycle_hooks=[hook],
+        session_runtime=runtime,
+    )
+    prior = [
+        {"role": "user", "content": "old " + "x" * 100},
+        {"role": "assistant", "content": "old answer"},
+        {"role": "user", "content": "new"},
+    ]
+
+    agent.run("inspect", prior_messages=prior)
+
+    old_payload = json.loads(session.session_path.read_text(encoding="utf-8"))
+    new_payload = json.loads(runtime.current.session_path.read_text(encoding="utf-8"))
+    assert runtime.current.session_id != session.session_id
+    assert old_payload["status"] == "compacted"
+    assert new_payload["messages"][0]["role"] == "assistant"
+    assert new_payload["messages"][0]["content"].startswith("[CONTEXT COMPACTION]")
+    assert new_payload["messages"][1:] == [{"role": "user", "content": "new"}]
+    assert json.loads((runtime.current.memory_dir / "scratchpad.json").read_text(encoding="utf-8"))[
+        "active_todos"
+    ] == ["next file"]
+    assert (runtime.current.memory_dir / "handoff.md").read_text(encoding="utf-8").strip() == "## 目标\n继续任务"
+
+
 def test_lifecycle_hook_observes_llm_response(tmp_path):
     seen = []
 
@@ -242,6 +291,6 @@ def test_memory_projection_hook_records_tool_results_after_execution(tmp_path):
     )
 
     scratchpad = store.load_scratchpad()
-    assert scratchpad["modified_files"] == ["notes.txt"]
-    assert store.load_file_summaries()["notes.txt"]["stale"] is True
-    assert store.tool_index_path.exists()
+    assert "notes.txt" in scratchpad["modified_files"]
+    assert not (store.memory_dir / "file_summaries.json").exists()
+    assert not (store.memory_dir / "tool_index.jsonl").exists()

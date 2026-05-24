@@ -13,7 +13,7 @@ from coding_agent.interrupts import TaskInterrupted
 from coding_agent.llm import LLMError
 from coding_agent.run_result import RunTaskResult
 from coding_agent.runtime_events import RuntimeEvent
-from coding_agent.session import SessionStore
+from coding_agent.session import ConversationStore, LegacySessionError, SessionRef
 
 app = typer.Typer(help="AI coding assistant CLI")
 console = Console()
@@ -49,13 +49,13 @@ def run(task: str) -> None:
 
 @app.command()
 def chat(
-    resume: Optional[Path] = typer.Option(None, "--resume", help="Load messages from a session JSON file"),
-    resume_latest: bool = typer.Option(False, "--resume-latest", help="Load the latest saved session"),
+    resume: Optional[Path] = typer.Option(None, "--resume", help="Resume a conversation or session directory"),
+    resume_latest: bool = typer.Option(False, "--resume-latest", help="Resume the latest conversation"),
 ) -> None:
     """Start an interactive coding session."""
     try:
-        messages = _load_chat_messages(resume, resume_latest)
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        session_ref, messages = _load_chat_session(resume, resume_latest)
+    except (OSError, ValueError, LegacySessionError, json.JSONDecodeError) as exc:
         console.print(f"[red]Error:[/] {exc}")
         raise typer.Exit(1) from exc
 
@@ -77,7 +77,7 @@ def chat(
             continue
 
         try:
-            task_result = _run_task(command, messages, mode="chat")
+            task_result = _invoke_run_task(command, messages, "chat", session_ref)
         except TaskInterrupted as exc:
             console.print(f"[yellow]Task interrupted:[/] {exc or 'user interrupted'}")
             continue
@@ -87,23 +87,32 @@ def chat(
 
         result = task_result.result
         messages[:] = result.conversation_messages
+        session_parent = Path(task_result.session_path).parent
+        if (session_parent / "session.json").exists():
+            session_ref = ConversationStore(Path.cwd()).resume(session_parent)
         _print_task_result(task_result)
 
 
-def _load_chat_messages(resume: Optional[Path], resume_latest: bool) -> list[dict[str, Any]]:
+def _load_chat_session(resume: Optional[Path], resume_latest: bool) -> tuple[SessionRef | None, list[dict[str, Any]]]:
     if resume is not None and resume_latest:
         raise ValueError("--resume and --resume-latest cannot be used together")
+    store = ConversationStore(Path.cwd())
     if resume is not None:
-        return SessionStore.load(resume)
+        session = store.resume(resume)
+        return session, store.load_session_messages(session)
     if resume_latest:
-        return SessionStore(Path.cwd()).load_latest() or []
-    return []
+        session = store.latest()
+        if session is None:
+            return None, []
+        return session, store.load_session_messages(session)
+    return None, []
 
 
 def _run_task(
     task: str,
     prior_messages: list[dict[str, Any]] | None,
     mode: str,
+    session_ref: SessionRef | None = None,
 ) -> RunTaskResult:
     config = load_config(Path.cwd())
     renderer_state = _new_renderer_state()
@@ -114,7 +123,24 @@ def _run_task(
         on_runtime_event=_make_runtime_event_printer(renderer_state),
         command_approval=_make_command_approval(),
     )
-    return application.run_task(task, prior_messages, mode)
+    if not hasattr(config, "project_root"):
+        return application.run_task(task, prior_messages, mode)
+    conversation_store = ConversationStore(config.project_root)
+    return application.run_task(task, prior_messages, mode, session_ref=session_ref, conversation_store=conversation_store)
+
+
+def _invoke_run_task(
+    task: str,
+    prior_messages: list[dict[str, Any]],
+    mode: str,
+    session_ref: SessionRef | None,
+) -> RunTaskResult:
+    try:
+        return _run_task(task, prior_messages, mode, session_ref=session_ref)
+    except TypeError as exc:
+        if "session_ref" not in str(exc):
+            raise
+        return _run_task(task, prior_messages, mode)
 
 
 def _print_task_result(task_result: RunTaskResult) -> None:
@@ -135,6 +161,8 @@ def _print_task_result(task_result: RunTaskResult) -> None:
         if ratio is not None:
             console.print(f"  Cache: {ratio:.0%} cached input tokens", style="dim")
     console.print(f"  Session: {task_result.session_path}", style="dim", markup=False)
+    if task_result.conversation_path is not None:
+        console.print(f"  Conversation: {task_result.conversation_path.parent}", style="dim", markup=False)
     if task_result.run_dir is not None:
         console.print(f"  Run: {task_result.run_dir}", style="dim", markup=False)
 
@@ -194,8 +222,6 @@ def _make_runtime_event_printer(state: dict[str, bool] | None = None) -> Any:
             injected.append("memory")
         if metadata.get("handoff_memo"):
             injected.append("handoff")
-        if metadata.get("file_summaries"):
-            injected.append("file summaries")
         injected_text = ", ".join(injected) if injected else "none"
         _print_section("context", style="green")
         console.print(
@@ -367,6 +393,4 @@ protected_recent_turns = 4
 protected_tool_results = 6
 handoff_max_chars = 6000
 scratchpad_max_chars = 4000
-file_summaries_max_count = 8
-file_summaries_max_chars = 8000
 """

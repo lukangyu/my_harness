@@ -490,7 +490,6 @@ def test_agent_emits_runtime_event_for_prompt_context(tmp_path):
                 "recent_messages": 0,
                 "memory_anchor": False,
                 "handoff_memo": False,
-                "file_summaries": False,
             },
         )
     ]

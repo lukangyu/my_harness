@@ -21,6 +21,18 @@ def test_run_store_creates_run_artifacts_and_initial_task_state(tmp_path):
     assert state.run_id == artifact.run_id
 
 
+def test_run_store_uses_injected_runs_root(tmp_path):
+    runs_root = tmp_path / ".coding-agent" / "conversations" / "c1" / "sessions" / "s1" / "runs"
+    store = RunStore(tmp_path, runs_root=runs_root)
+
+    artifact, _ = store.start_run(task="do work", mode="run", workspace_root=tmp_path)
+
+    assert artifact.run_dir.parent == runs_root
+    assert artifact.dialog_dir.parent == artifact.run_dir
+    assert artifact.tool_result_dir.parent == artifact.run_dir
+    assert store.index_path == runs_root / "index.jsonl"
+
+
 def test_run_store_writes_report_with_usage_and_artifact_paths(tmp_path):
     store = RunStore(tmp_path)
     artifact, state = store.start_run(task="do work", mode="chat", workspace_root=tmp_path)

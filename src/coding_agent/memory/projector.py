@@ -10,16 +10,6 @@ class MemoryFacade(Protocol):
     def save_scratchpad(self, scratchpad: dict[str, Any]) -> None:
         ...
 
-    def update_file_summary(self, path: str) -> dict[str, Any] | None:
-        ...
-
-    def invalidate_file_summary(self, path: str, reason: str) -> None:
-        ...
-
-    def append_tool_index(self, record: dict[str, Any]) -> None:
-        ...
-
-
 class ToolMemoryProjector:
     def __init__(
         self,
@@ -39,15 +29,12 @@ class ToolMemoryProjector:
         scratchpad = self.memory_store.load_scratchpad()
         if tool == "read_file" and isinstance(result.get("path"), str):
             _append_unique(scratchpad, "read_files", result["path"])
-            self.memory_store.update_file_summary(result["path"])
         if tool == "write_file" and isinstance(result.get("path"), str):
             _append_unique(scratchpad, "modified_files", result["path"])
-            self.memory_store.invalidate_file_summary(result["path"], "written")
         if tool == "apply_patch":
             for path in result.get("changed_files") or []:
                 if isinstance(path, str):
                     _append_unique(scratchpad, "modified_files", path)
-                    self.memory_store.invalidate_file_summary(path, "patched")
         if tool == "run_shell":
             _append_limited(
                 scratchpad,
@@ -71,14 +58,6 @@ class ToolMemoryProjector:
                 limit=30,
             )
         self.memory_store.save_scratchpad(scratchpad)
-        self.memory_store.append_tool_index(
-            {
-                "tool": tool,
-                "summary": self.summarize_tool_result(tool, arguments, result),
-                "ok": result.get("ok"),
-                "metadata": result.get("metadata") or {},
-            }
-        )
 
 
 def _append_unique(scratchpad: dict[str, Any], key: str, value: str, *, limit: int = 100) -> None:
