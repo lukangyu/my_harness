@@ -71,7 +71,7 @@ class Application:
             workspace_root=sandbox.root,
         )
         telemetry = TelemetryLogger(
-            run_artifact.run_dir,
+            run_artifact.audit_dir,
             workspace_root=sandbox.root,
             run_id=run_artifact.run_id,
         )

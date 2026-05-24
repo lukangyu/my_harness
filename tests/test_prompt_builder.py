@@ -147,8 +147,8 @@ def test_prompt_builder_mentions_context_archives_when_read_file_exists(tmp_path
     system = create_default_prompt_builder().build_final_messages(context)[0]["content"]
 
     assert "CONTEXT MANAGEMENT NOTICE" in system
-    assert "tool_result/" in system
-    assert "dialog/" in system
+    assert "agent_context/tool_result/" in system
+    assert "agent_context/dialog/" in system
     assert "use your read_file tool" in system
 
 

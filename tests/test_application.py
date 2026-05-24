@@ -74,7 +74,7 @@ def test_application_imports_and_run_task_constructs_runtime(tmp_path, monkeypat
     assert result.result.final_answer == "done"
     assert result.session_path.exists()
     assert result.run_dir is not None
-    assert (result.run_dir / "task_state.json").exists()
+    assert (result.run_dir / "audit" / "task_state.json").exists()
     assert progress_events == [
         {
             "task": "inspect",

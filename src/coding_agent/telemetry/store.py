@@ -15,8 +15,9 @@ SCHEMA_VERSION = 1
 class RunArtifact:
     run_id: str
     run_dir: Path
+    agent_context_dir: Path
+    audit_dir: Path
     task_state_path: Path
-    trace_path: Path
     events_path: Path
     report_path: Path
     debug_dir: Path
@@ -67,18 +68,21 @@ class RunStore:
     def start_run(self, *, task: str, mode: str, workspace_root: Path | str) -> tuple[RunArtifact, TaskState]:
         run_id = f"{time.strftime('%Y%m%d-%H%M%S', time.localtime())}-{uuid.uuid4().hex[:8]}"
         run_dir = self.runs_dir / run_id
+        agent_context_dir = run_dir / "agent_context"
+        audit_dir = run_dir / "audit"
         artifact = RunArtifact(
             run_id=run_id,
             run_dir=run_dir,
-            task_state_path=run_dir / "task_state.json",
-            trace_path=run_dir / "trace.jsonl",
-            events_path=run_dir / "events.jsonl",
-            report_path=run_dir / "report.json",
-            debug_dir=run_dir / "debug",
-            dialog_dir=run_dir / "dialog",
-            tool_result_dir=run_dir / "tool_result",
+            agent_context_dir=agent_context_dir,
+            audit_dir=audit_dir,
+            task_state_path=audit_dir / "task_state.json",
+            events_path=audit_dir / "events.jsonl",
+            report_path=audit_dir / "report.json",
+            debug_dir=audit_dir / "debug",
+            dialog_dir=agent_context_dir / "dialog",
+            tool_result_dir=agent_context_dir / "tool_result",
         )
-        for path in (artifact.debug_dir, artifact.dialog_dir, artifact.tool_result_dir):
+        for path in (artifact.audit_dir, artifact.debug_dir, artifact.dialog_dir, artifact.tool_result_dir):
             path.mkdir(parents=True, exist_ok=True)
         state = TaskState(run_id=run_id, task=task, mode=mode, workspace_root=str(Path(workspace_root).resolve()))
         self.write_task_state(artifact, state)
@@ -111,14 +115,18 @@ class RunStore:
             "last_tool": state.last_tool,
             "files_changed": files_changed or [],
             "usage": _usage_to_dict(usage),
+            "prompt_metadata": _prompt_metadata(usage),
             "task_state": state.to_dict(),
             "artifact_paths": {
-                "task_state": _relative(artifact.task_state_path, self.project_root),
-                "trace": _relative(artifact.trace_path, self.project_root),
-                "events": _relative(artifact.events_path, self.project_root),
-                "debug_dir": _relative(artifact.debug_dir, self.project_root),
-                "dialog_dir": _relative(artifact.dialog_dir, self.project_root),
-                "tool_result_dir": _relative(artifact.tool_result_dir, self.project_root),
+                "audit": {
+                    "task_state": _relative(artifact.task_state_path, self.project_root),
+                    "events": _relative(artifact.events_path, self.project_root),
+                    "debug_dir": _relative(artifact.debug_dir, self.project_root),
+                },
+                "agent_context": {
+                    "dialog_dir": _relative(artifact.dialog_dir, self.project_root),
+                    "tool_result_dir": _relative(artifact.tool_result_dir, self.project_root),
+                },
             },
             "created_at": _now(),
         }
@@ -139,6 +147,16 @@ def _usage_to_dict(usage: Any) -> dict[str, Any] | None:
         "output_tokens": getattr(usage, "output_tokens", None),
         "cached_tokens": getattr(usage, "cached_tokens", None),
         "cache_hit_ratio": getattr(usage, "cache_hit_ratio", None),
+    }
+
+
+def _prompt_metadata(usage: Any) -> dict[str, Any]:
+    usage_dict = _usage_to_dict(usage) or {}
+    return {
+        "input_tokens": usage_dict.get("input_tokens"),
+        "output_tokens": usage_dict.get("output_tokens"),
+        "cached_tokens": usage_dict.get("cached_tokens"),
+        "cache_hit_ratio": usage_dict.get("cache_hit_ratio"),
     }
 
 

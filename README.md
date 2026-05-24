@@ -16,7 +16,7 @@
 - phase/order 生命周期 Hook：按阶段编排上下文压缩、checkpoint、记忆投影和长输出 offload。
 - pre-LLM 上下文压缩：旧消息归档，新 session epoch 从 compact summary 继续。
 - conversation 级 checkpoint：写文件前确认 workspace、git 分支、HEAD 和目标文件 last-seen 状态，防止外部编辑被覆盖。
-- 长工具输出通过 `ToolResultOffloadHook` 转存到 `tool_result/*.txt`。
+- 长工具输出通过 `ToolResultOffloadHook` 转存到 `agent_context/tool_result/*.txt`。
 - session memory 只保留 `handoff.md` 和 `scratchpad.json`，不保存 file summary cache 或 tool index。
 
 ## 存储结构
@@ -39,15 +39,16 @@
             scratchpad.json
           runs/
             <run_id>/
-              task_state.json
-              report.json
-              trace.jsonl
-              events.jsonl
-              debug/
-              dialog/
-                *.jsonl
-              tool_result/
-                *.txt
+              agent_context/
+                dialog/
+                  *.jsonl
+                tool_result/
+                  *.txt
+              audit/
+                task_state.json
+                report.json
+                events.jsonl
+                debug/
 ```
 
 核心关系：
@@ -57,6 +58,7 @@
 - `conversation/memory`：跨 session 的长期记忆候选，当前由压缩时顺带提取。
 - `session`：一个上下文窗口 epoch。触发压缩后会创建新 session。
 - `run`：一次 AgentLoop 执行，挂在当前 session 下。
+- `agent_context`：模型可通过路径回溯的归档上下文；`audit`：人类审计和实验统计工件，不由 `session_search` 主动暴露。
 
 旧的 flat session 路径 `.coding-agent/sessions/*.json` 不再支持 `--resume`。
 
@@ -88,7 +90,7 @@ estimate_active_tokens > max_input_tokens * compact_threshold_ratio
 压缩后：
 
 1. 旧 session 保留完整 `session.json`。
-2. 被移出上下文的旧消息写入当前 run 的 `dialog/*.jsonl`。
+2. 被移出上下文的旧消息写入当前 run 的 `agent_context/dialog/*.jsonl`。
 3. 压缩模型输出 JSON：`handoff` 和长期 `memories`。
 4. 旧 session 标记为 `compacted`。
 5. 新 session 创建为 `active`。

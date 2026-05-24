@@ -31,15 +31,16 @@
             scratchpad.json
           runs/
             <run_id>/
-              task_state.json
-              report.json
-              trace.jsonl
-              events.jsonl
-              debug/
-              dialog/
-                *.jsonl
-              tool_result/
-                *.txt
+              agent_context/
+                dialog/
+                  *.jsonl
+                tool_result/
+                  *.txt
+              audit/
+                task_state.json
+                report.json
+                events.jsonl
+                debug/
 ```
 
 语义：
@@ -49,6 +50,7 @@
 - `conversation/memory`：跨 session 的长期记忆候选，由压缩时提取。
 - `session`：上下文窗口 epoch。
 - `run`：一次 AgentLoop 执行。
+- `agent_context`：模型可通过路径回溯的归档上下文；`audit`：人类审计和实验统计工件，不由 `session_search` 主动暴露。
 
 不保留派生缓存：
 
@@ -158,7 +160,7 @@ on_turn_end
 `ContextCompressor` 在超出阈值时：
 
 1. 切分旧历史和 protected recent messages。
-2. 归档旧消息到 `runs/<run_id>/dialog/*.jsonl`。
+2. 归档旧消息到 `runs/<run_id>/agent_context/dialog/*.jsonl`。
 3. 用压缩模型生成 JSON：`handoff` 和长期 `memories`。
 4. 写当前 memory handoff。
 5. 将长期 memories 追加到 `conversation/memory/raw/YYYY-MM-DD.jsonl`。
@@ -213,7 +215,7 @@ user: current task
 `after_tool` 阶段靠后执行，把超长 tool result 转存到：
 
 ```text
-session/runs/<run_id>/tool_result/*.txt
+session/runs/<run_id>/agent_context/tool_result/*.txt
 ```
 
 最终返回给模型的 tool message 只保留 preview、路径和读取指引。
@@ -318,7 +320,7 @@ conversation/memory/raw/YYYY-MM-DD.jsonl
 session A active
   │
   ├─ pre_llm 超限
-  ├─ 旧消息归档到 session A/runs/<run_id>/dialog
+  ├─ 旧消息归档到 session A/runs/<run_id>/agent_context/dialog
   ├─ 生成 compact summary + long-term memories
   ├─ memories 写入 conversation/memory/raw
   ├─ session A 标记 compacted
@@ -332,7 +334,7 @@ session A active
 
 ```text
 session_search(query=...)
-  -> 找到 dialog/tool_result/session/memory 路径
+  -> 找到 agent_context/dialog、agent_context/tool_result、session、memory 路径
 read_file(path=...)
   -> 读取原文
 ```

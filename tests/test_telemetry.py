@@ -7,7 +7,7 @@ def read_jsonl(path):
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
-def test_telemetry_writes_chinese_events_and_trace_jsonl(tmp_path):
+def test_telemetry_writes_events_and_spans_to_single_events_jsonl(tmp_path):
     telemetry = TelemetryLogger(tmp_path / "logs", workspace_root=tmp_path)
 
     with telemetry.span("测试阶段", function="test_function", phase="test", metadata={"x": 1}):
@@ -17,18 +17,20 @@ def test_telemetry_writes_chinese_events_and_trace_jsonl(tmp_path):
             function="test_function",
             phase="test",
             metadata={"value": "ok"},
-        )
+    )
 
     events = read_jsonl(tmp_path / "logs" / "events.jsonl")
-    traces = read_jsonl(tmp_path / "logs" / "trace.jsonl")
+    event_records = [record for record in events if record["kind"] == "event"]
+    span_records = [record for record in events if record["kind"] == "span"]
 
-    assert any(record["message_zh"] == "这是一条中文事件" for record in events)
-    assert traces[0]["name"] == "测试阶段"
-    assert traces[0]["function"] == "test_function"
-    assert traces[0]["ok"] is True
-    assert traces[0]["duration_ms"] >= 0
-    assert not any(record["event"] == "测试阶段.start" for record in events)
-    assert not any(record["event"] == "测试阶段.end" for record in events)
+    assert any(record["message_zh"] == "这是一条中文事件" for record in event_records)
+    assert span_records[0]["name"] == "测试阶段"
+    assert span_records[0]["function"] == "test_function"
+    assert span_records[0]["ok"] is True
+    assert span_records[0]["duration_ms"] >= 0
+    assert not (tmp_path / "logs" / "trace.jsonl").exists()
+    assert not any(record.get("event") == "测试阶段.start" for record in events)
+    assert not any(record.get("event") == "测试阶段.end" for record in events)
 
 
 def test_workspace_snapshot_records_files_and_directories(tmp_path):
@@ -56,6 +58,7 @@ def test_workspace_snapshot_event_is_appended(tmp_path):
     )
 
     events = read_jsonl(tmp_path / "logs" / "events.jsonl")
+    assert events[0]["kind"] == "event"
     assert events[0]["event"] == "workspace.snapshot"
     assert events[0]["message_zh"] == "记录 workspace 快照"
     assert "notes.txt" in events[0]["metadata"]["files"]

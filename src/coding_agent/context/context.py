@@ -408,7 +408,7 @@ def partition_messages(
         if prepared.get("role") == "tool":
             protected_tool_count += 1
             if protected_tool_count > protected_tool_results:
-                prepared["content"] = "[旧 tool 输出已清理，关键结论见 handoff_memo 或 trace.jsonl]"
+                prepared["content"] = "[旧 tool 输出已清理，关键结论见 handoff_memo 或 audit/events.jsonl]"
             protected.append(prepared)
             continue
         protected.append(prepared)
@@ -426,7 +426,7 @@ def partition_messages(
         if prepared.get("role") == "tool":
             protected_tool_count += 1
             if protected_tool_count > protected_tool_results:
-                prepared["content"] = "[旧 tool 输出已清理，关键结论见 handoff_memo 或 trace.jsonl]"
+                prepared["content"] = "[旧 tool 输出已清理，关键结论见 handoff_memo 或 audit/events.jsonl]"
         protected.append(prepared)
     return MessagePartitions(compactable=deepcopy(messages[:cutoff]), reserved=protected)
 

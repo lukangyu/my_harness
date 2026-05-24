@@ -290,7 +290,7 @@ def test_session_search_uses_rg_when_available(tmp_path, monkeypatch):
 
     def fake_run(command, **kwargs):
         calls.append((command, kwargs))
-        return SimpleNamespace(returncode=0, stdout="20260524/dialog/log.jsonl:7:critical decision\n")
+        return SimpleNamespace(returncode=0, stdout="20260524/agent_context/dialog/log.jsonl:7:critical decision\n")
 
     monkeypatch.setattr("coding_agent.execution.tools.shutil.which", lambda name: "rg.exe" if name == "rg" else None)
     monkeypatch.setattr("coding_agent.execution.tools.subprocess.run", fake_run)
@@ -301,7 +301,7 @@ def test_session_search_uses_rg_when_available(tmp_path, monkeypatch):
     assert result["matches"] == [
         {
             "source": "dialog",
-            "path": ".coding-agent/runs/20260524/dialog/log.jsonl",
+            "path": ".coding-agent/runs/20260524/agent_context/dialog/log.jsonl",
             "line": 7,
             "text": "critical decision",
         }
@@ -319,7 +319,8 @@ def test_session_search_filters_sources_and_limits_results(tmp_path, monkeypatch
     memory_root.mkdir(parents=True)
     runs_root.mkdir(parents=True)
     (memory_root / "handoff.md").write_text("needle one\nneedle two\n", encoding="utf-8")
-    (runs_root / "trace.jsonl").write_text("needle run\n", encoding="utf-8")
+    (runs_root / "run-1" / "audit").mkdir(parents=True)
+    (runs_root / "run-1" / "audit" / "events.jsonl").write_text("needle run\n", encoding="utf-8")
     register_session_search_tool(tools, WorkspaceSandbox(tmp_path), [memory_root, runs_root])
     monkeypatch.setattr("coding_agent.execution.tools.shutil.which", lambda name: None)
 
@@ -336,6 +337,31 @@ def test_session_search_filters_sources_and_limits_results(tmp_path, monkeypatch
     ]
     assert result["metadata"]["truncated"] is True
     assert result["metadata"]["searched_roots"] == [".coding-agent/memory", ".coding-agent/runs"]
+
+
+def test_session_search_skips_audit_directory(tmp_path, monkeypatch):
+    tools = make_tools(tmp_path)
+    runs_root = tmp_path / ".coding-agent" / "runs"
+    audit_dir = runs_root / "run-1" / "audit"
+    dialog_dir = runs_root / "run-1" / "agent_context" / "dialog"
+    audit_dir.mkdir(parents=True)
+    dialog_dir.mkdir(parents=True)
+    (audit_dir / "events.jsonl").write_text("needle audit\n", encoding="utf-8")
+    (dialog_dir / "archive.jsonl").write_text("needle dialog\n", encoding="utf-8")
+    register_session_search_tool(tools, WorkspaceSandbox(tmp_path), [runs_root])
+    monkeypatch.setattr("coding_agent.execution.tools.shutil.which", lambda name: None)
+
+    result = tools.call("session_search", {"query": "needle"})
+
+    assert result["ok"] is True
+    assert result["matches"] == [
+        {
+            "source": "dialog",
+            "path": ".coding-agent/runs/run-1/agent_context/dialog/archive.jsonl",
+            "line": 1,
+            "text": "needle dialog",
+        }
+    ]
 
 
 def test_session_search_sees_memory_root_created_after_registration(tmp_path, monkeypatch):

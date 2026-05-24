@@ -10,9 +10,17 @@ def test_run_store_creates_run_artifacts_and_initial_task_state(tmp_path):
     artifact, state = store.start_run(task="do work", mode="run", workspace_root=tmp_path)
 
     assert artifact.run_dir.exists()
+    assert artifact.audit_dir.exists()
+    assert artifact.agent_context_dir.exists()
     assert artifact.debug_dir.exists()
     assert artifact.dialog_dir.exists()
     assert artifact.tool_result_dir.exists()
+    assert artifact.task_state_path.parent == artifact.audit_dir
+    assert artifact.report_path.parent == artifact.audit_dir
+    assert artifact.events_path.parent == artifact.audit_dir
+    assert artifact.debug_dir.parent == artifact.audit_dir
+    assert artifact.dialog_dir.parent == artifact.agent_context_dir
+    assert artifact.tool_result_dir.parent == artifact.agent_context_dir
     task_state = json.loads(artifact.task_state_path.read_text(encoding="utf-8"))
     assert task_state["schema_version"] == 1
     assert task_state["run_id"] == artifact.run_id
@@ -28,8 +36,8 @@ def test_run_store_uses_injected_runs_root(tmp_path):
     artifact, _ = store.start_run(task="do work", mode="run", workspace_root=tmp_path)
 
     assert artifact.run_dir.parent == runs_root
-    assert artifact.dialog_dir.parent == artifact.run_dir
-    assert artifact.tool_result_dir.parent == artifact.run_dir
+    assert artifact.audit_dir.parent == artifact.run_dir
+    assert artifact.agent_context_dir.parent == artifact.run_dir
     assert store.index_path == runs_root / "index.jsonl"
 
 
@@ -56,6 +64,11 @@ def test_run_store_writes_report_with_usage_and_artifact_paths(tmp_path):
     assert report["run_id"] == artifact.run_id
     assert report["status"] == "completed"
     assert report["usage"]["cache_hit_ratio"] == 0.5
+    assert report["prompt_metadata"]["cache_hit_ratio"] == 0.5
     assert report["files_changed"] == ["a.py"]
-    assert report["artifact_paths"]["trace"].endswith("trace.jsonl")
+    assert report["artifact_paths"]["audit"]["task_state"].endswith("audit/task_state.json")
+    assert report["artifact_paths"]["audit"]["events"].endswith("audit/events.jsonl")
+    assert report["artifact_paths"]["audit"]["debug_dir"].endswith("audit/debug")
+    assert report["artifact_paths"]["agent_context"]["dialog_dir"].endswith("agent_context/dialog")
+    assert report["artifact_paths"]["agent_context"]["tool_result_dir"].endswith("agent_context/tool_result")
     assert store.index_path.exists()

@@ -796,7 +796,7 @@ def _iter_files(root: Path, base: Path, *, max_depth: int | None) -> list[Path]:
 def _iter_memory_files(root: Path) -> list[Path]:
     files: list[Path] = []
     for child in root.iterdir():
-        if child.name in {"__pycache__"} or child.name.startswith(".pytest"):
+        if child.name in {"__pycache__", "audit"} or child.name.startswith(".pytest"):
             continue
         if child.is_file():
             files.append(child)
@@ -820,6 +820,10 @@ def _session_search_sources(value: Any) -> set[str] | None:
 
 def _session_source_for_path(relative: str) -> str:
     parts = Path(relative).parts
+    if "agent_context" in parts and "dialog" in parts:
+        return "dialog"
+    if "agent_context" in parts and "tool_result" in parts:
+        return "tool_result"
     if "dialog" in parts:
         return "dialog"
     if "tool_result" in parts:

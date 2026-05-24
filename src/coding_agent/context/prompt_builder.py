@@ -116,7 +116,7 @@ class PromptBuilder:
             "CONTEXT MANAGEMENT NOTICE:\n"
             "To fit into the context window, massive tool outputs and archived dialogs "
             "may be offloaded to local files. You may see reference paths like "
-            "`tool_result/xxxx.txt` or `dialog/xxxx.jsonl` in context frames."
+            "`agent_context/tool_result/xxxx.txt` or `agent_context/dialog/xxxx.jsonl` in context frames."
         )
         if self._has_tool(context, "read_file"):
             return (

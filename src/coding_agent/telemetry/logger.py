@@ -44,6 +44,7 @@ class TelemetryLogger:
         self._append_jsonl(
             "events.jsonl",
             {
+                "kind": "event",
                 "timestamp": _now_ms(),
                 "run_id": self.run_id,
                 "event": event,
@@ -76,6 +77,7 @@ class TelemetryLogger:
         finally:
             duration_ms = int((time.perf_counter() - started) * 1000)
             record: dict[str, Any] = {
+                "kind": "span",
                 "timestamp": _now_ms(),
                 "run_id": self.run_id,
                 "span_id": span_id,
@@ -88,7 +90,7 @@ class TelemetryLogger:
             }
             if error:
                 record["error"] = error
-            self._append_jsonl("trace.jsonl", record)
+            self._append_jsonl("events.jsonl", record)
 
     def workspace_snapshot(
         self,
