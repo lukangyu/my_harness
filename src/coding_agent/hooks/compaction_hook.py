@@ -29,7 +29,7 @@ class ContextCompactionHook(AgentLifecycleHook):
             if result.compacted and ctx.session_runtime is not None and result.summary_message is not None:
                 next_session = ctx.session_runtime.store.compact_session(
                     ctx.session_runtime.current,
-                    seed_messages=[result.summary_message, *(result.remaining_messages or [])],
+                    seed_messages=result.remaining_messages or [],
                     summary=result.summary,
                 )
                 ctx.session_runtime.current = next_session

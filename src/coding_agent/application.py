@@ -15,6 +15,7 @@ from coding_agent.execution.shell import ShellRunner
 from coding_agent.execution.tools import create_default_tools, register_session_search_tool
 from coding_agent.hooks.compaction_hook import ContextCompactionHook
 from coding_agent.hooks.memory_hook import MemoryProjectionHook
+from coding_agent.hooks.memory_search_hook import MemorySearchHook
 from coding_agent.hooks.tool_result_offload_hook import ToolResultOffloadHook
 from coding_agent.llm import OpenAICompatibleClient
 from coding_agent.memory.store import MemoryStore
@@ -122,6 +123,11 @@ class Application:
             "pre_llm",
             ContextCompactionHook(memory_store=memory_store, compact_client=client),
             order=1,
+        )
+        lifecycle_registry.add(
+            "pre_llm",
+            MemorySearchHook(memory_store, telemetry=telemetry),
+            order=90,
         )
         lifecycle_registry.add("after_tool", MemoryProjectionHook(memory_store), order=1)
         lifecycle_registry.add(

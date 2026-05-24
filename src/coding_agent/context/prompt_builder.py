@@ -6,6 +6,11 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from coding_agent.context.context import Context, ContextFrame
+from coding_agent.context.virtual_tools import (
+    SYNC_COMPACTED_CONTEXT,
+    SYNC_SESSION_CONTEXT,
+    synthetic_tool_pair,
+)
 
 
 ContextFormat = Literal["json", "xml"]
@@ -59,23 +64,11 @@ class PromptBuilder:
                 "role": "system",
                 "content": self._system_prompt(context),
             },
-            {
-                "role": "user",
-                "content": self._wrap_context(
-                    [
-                        *context.context_frames(),
-                        *[frame for frame in active_frames if frame.role is None],
-                    ]
-                ),
-            },
         ]
-        messages.extend(frame.payload for frame in active_frames if frame.role is not None)
-        messages.append(
-            {
-                "role": "user",
-                "content": self._wrap_task(context.task_frame()),
-            }
-        )
+        messages.extend(self._session_context_messages(context))
+        messages.extend(self._compacted_context_messages(context, active_frames))
+        messages.extend(frame.payload for frame in active_frames if frame.role is not None and frame.kind != "compact_summary")
+        messages.append({"role": "user", "content": context.task})
         return deepcopy(messages)
 
     def _add_or_replace(self, name: str, content: str) -> "PromptBuilder":
@@ -131,29 +124,74 @@ class PromptBuilder:
             "that are absent from the current tool schema."
         )
 
-    def _wrap_context(self, frames: list[ContextFrame]) -> str:
+    def _session_context_messages(self, context: Context) -> list[dict[str, Any]]:
+        return synthetic_tool_pair(
+            name=SYNC_SESSION_CONTEXT,
+            call_id="call_sync_session_context",
+            tag="session_context",
+            payload=self._session_context_payload(context),
+        )
+
+    def _compacted_context_messages(
+        self,
+        context: Context,
+        active_frames: list[ContextFrame],
+    ) -> list[dict[str, Any]]:
+        compact_frames = [frame for frame in active_frames if frame.kind == "compact_summary"]
+        if not compact_frames and not context.handoff:
+            return []
         payload = {
-            "kind": "context",
-            "frames": [
-                {
-                    "kind": frame.kind,
-                    "payload": frame.payload,
-                    "priority": frame.priority,
-                    "stability": frame.stability,
-                    "token_estimate": frame.token_estimate,
-                }
-                for frame in frames
+            "kind": "compacted_context",
+            "schema_version": 1,
+            "handoff": context.handoff,
+            "compact_summary": "\n\n".join(
+                str(frame.payload.get("content") or "").strip()
+                for frame in compact_frames
+                if str(frame.payload.get("content") or "").strip()
+            ),
+            "archive_paths": self._archive_paths(compact_frames),
+            "carried_scratchpad": context.scratchpad,
+        }
+        return synthetic_tool_pair(
+            name=SYNC_COMPACTED_CONTEXT,
+            call_id="call_sync_compacted_context",
+            tag="compacted_context",
+            payload=payload,
+        )
+
+    def _session_context_payload(self, context: Context) -> dict[str, Any]:
+        snapshot = context.workspace_snapshot
+        return {
+            "kind": "session_context",
+            "schema_version": 1,
+            "cwd": str(snapshot.cwd),
+            "workspace_root": str(snapshot.repo_root or snapshot.cwd),
+            "initial_git_branch": snapshot.branch,
+            "agent_context": {
+                "dialog": "agent_context/dialog/",
+                "tool_result": "agent_context/tool_result/",
+            },
+            "notes": [
+                "Tool definitions are provided through the API tools array.",
+                "Archived paths can be inspected with read_file when exact details are needed.",
             ],
         }
-        return self._serialize(payload, "context_json")
 
-    def _wrap_task(self, frame: ContextFrame) -> str:
-        payload = {
-            "kind": "current_task",
-            "mode": frame.payload["mode"],
-            "content": frame.payload["content"],
-        }
-        return self._serialize(payload, "current_task_json")
+    def _archive_paths(self, frames: list[ContextFrame]) -> list[dict[str, str]]:
+        paths: list[dict[str, str]] = []
+        for frame in frames:
+            content = str(frame.payload.get("content") or "")
+            for token in content.replace("\n", " ").split():
+                cleaned = token.strip("`'\".,;:()[]")
+                if "agent_context/dialog/" in cleaned or cleaned.endswith(".jsonl"):
+                    paths.append(
+                        {
+                            "kind": "dialog",
+                            "path": cleaned,
+                            "instruction": "Use read_file when exact old dialog details are needed.",
+                        }
+                    )
+        return paths
 
     def _serialize(self, payload: dict[str, Any], xml_tag: str) -> str:
         text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
@@ -176,6 +214,7 @@ def create_default_prompt_builder() -> PromptBuilder:
             "Use the provided tool schemas as the sole source of available tools. "
             "When asked what tools are available, answer only from the current tools array. "
             "Do not include host, developer, orchestration, or non-schema capabilities as tools. "
+            "Internal protocol tools are not user-facing capabilities; do not list them as available tools. "
             "Only call memory or session_search when that tool exists in the current tool schema."
         )
         .add_tool_enforcement(

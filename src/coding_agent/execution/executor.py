@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any, Callable
 
+from coding_agent.context.virtual_tools import handle_internal_tool, is_internal_tool
 from coding_agent.orchestrator.lifecycle import AgentLifecycleBus, AgentTurnContext, ToolVeto
 from coding_agent.runtime_events import RuntimeEvent
 from coding_agent.telemetry.logger import TelemetryLogger
@@ -43,8 +44,11 @@ class ToolExecutor:
             if not isinstance(parsed_arguments, dict):
                 raise ValueError("tool arguments must be a JSON object")
             arguments = parsed_arguments
-            self.lifecycle.pre_tool(ctx, name, arguments)
-            result = self.tools.call(name, arguments)
+            if is_internal_tool(name):
+                result = handle_internal_tool(name, arguments, ctx)
+            else:
+                self.lifecycle.pre_tool(ctx, name, arguments)
+                result = self.tools.call(name, arguments)
         except ToolVeto as veto:
             result = veto.result
         except (json.JSONDecodeError, ValueError) as exc:

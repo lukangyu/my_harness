@@ -3,7 +3,7 @@
 `coding-agent` 的运行时按职责拆成五个域：
 
 - **Orchestrator**：管理 run 生命周期和 LLM-Tool 循环。
-- **Context**：管理结构化上下文、压缩和最终 messages 编译。
+- **Context**：管理结构化上下文和压缩输入，`PromptBuilder` 负责最终 messages 编译。
 - **Execution**：执行工具调用，并用 sandbox/policy 限制副作用。
 - **Checkpoint**：保存 conversation 级工作区乐观锁，防止陈旧读取后的脏写。
 - **Memory**：保存 session 级 handoff 与 scratchpad。
@@ -73,7 +73,7 @@
 - 将 `MemoryStore` 挂到 `session/memory`
 - 将 `CheckpointStore` 挂到 `conversation/checkpoints`
 - 注册默认工具和 `session_search`
-- 通过 `AgentLifecycleRegistry` 按 phase/order 注册 `CheckpointHook`、`ContextCompactionHook`、`MemoryProjectionHook` 和 `ToolResultOffloadHook`
+- 通过 `AgentLifecycleRegistry` 按 phase/order 注册 `CheckpointHook`、`ContextCompactionHook`、`MemorySearchHook`、`MemoryProjectionHook` 和 `ToolResultOffloadHook`
 - 创建 `AgentLoop` 与 `RunCoordinator`
 
 ### `session.py`
@@ -164,7 +164,7 @@ on_turn_end
 3. 用压缩模型生成 JSON：`handoff` 和长期 `memories`。
 4. 写当前 memory handoff。
 5. 将长期 memories 追加到 `conversation/memory/raw/YYYY-MM-DD.jsonl`。
-6. 将 compact summary 作为 assistant 消息插入 active history。
+6. 将 compact summary 插入 active history，供本轮 `PromptBuilder` 转成 `sync_compacted_context` 前缀。
 7. 返回 `CompressionResult` 给 hook 做 session rotation。
 
 如果模型没有返回合法 JSON，压缩器会把原始文本当作 handoff，`memories=[]`，避免记忆提取失败阻塞上下文压缩。
@@ -175,12 +175,16 @@ on_turn_end
 
 ```text
 system: 固定规训和工具边界
-user: workspace / scratchpad / handoff
-assistant/user/tool: active history
-user: current task
+assistant/tool: sync_session_context 固定 session 前缀
+assistant/tool: sync_compacted_context 可选压缩交接前缀
+assistant/user/tool: append-only active history
+user: 当前用户原文
+assistant/tool: auto_memory_search 可选记忆检索结果
 ```
 
 工具 schema 不写进 prompt，仍通过 API `tools` 数组传递。
+
+`sync_session_context`、`sync_compacted_context`、`auto_memory_search` 和 `notify_context_invalidated` 是 internal virtual tools：只在请求期临时加入 API `tools` 数组，保证 synthetic tool pairs 合法；它们不注册进用户可见 `ToolRegistry`。
 
 ### `execution/tools.py`
 
@@ -294,6 +298,17 @@ conversation/memory/raw/YYYY-MM-DD.jsonl
 
 长期记忆不默认进入 prompt；后续通过 `memory_search` 或 dream 整理再复用。
 
+### `hooks/memory_search_hook.py`
+
+`pre_llm` 阶段在当前用户请求确定后进行轻量关键词检索。命中长期记忆时，注入一对已完成的 internal tool 消息：
+
+```text
+assistant -> auto_memory_search({"query": "..."})
+tool      -> <memory_search_results>{...}</memory_search_results>
+```
+
+这对消息不写入真实 session history，只作为本轮推理上下文。
+
 ### `hooks/compaction_hook.py`
 
 `pre_llm` 阶段：
@@ -325,10 +340,12 @@ session A active
   ├─ memories 写入 conversation/memory/raw
   ├─ session A 标记 compacted
   ├─ 创建 session B
-  ├─ session B 保存 summary + protected messages
+  ├─ session B 只保存 protected messages
   ├─ session B 继承 scratchpad
   └─ conversation.active_session_id -> session B
 ```
+
+session B 之后的 prompt 会从 `memory/handoff.md` 渲染 `sync_compacted_context`，而不是把 compact summary 作为真实 assistant 历史消息保存。
 
 回溯时：
 

@@ -89,6 +89,9 @@ class MemoryStore:
     ) -> list[dict[str, Any]]:
         return self.long_term_store.append_memories(memories, source=source, evidence=evidence)
 
+    def search_long_term_memories(self, query: str, *, max_results: int = 3) -> list[dict[str, Any]]:
+        return self.long_term_store.search_memories(query, max_results=max_results)
+
     def render_memory_anchor(self, *, max_chars: int) -> str:
         scratchpad = self.load_scratchpad()
         text = "<memory_anchor>\n" + json.dumps(scratchpad, indent=2, ensure_ascii=False) + "\n</memory_anchor>"

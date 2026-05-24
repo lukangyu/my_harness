@@ -70,15 +70,13 @@ def test_build_final_messages_outputs_kv_cache_order(tmp_path, monkeypatch):
     messages = create_default_prompt_builder().build_final_messages(context)
 
     assert messages[0]["role"] == "system"
-    assert messages[1]["role"] == "user"
-    assert json.loads(messages[1]["content"])["kind"] == "context"
-    assert messages[2] == {"role": "user", "content": "earlier"}
-    assert messages[3]["role"] == "user"
-    assert json.loads(messages[3]["content"]) == {
-        "kind": "current_task",
-        "mode": "chat",
-        "content": "current task",
-    }
+    assert messages[1]["role"] == "assistant"
+    assert messages[1]["tool_calls"][0]["function"]["name"] == "sync_session_context"
+    assert messages[2]["role"] == "tool"
+    assert messages[2]["name"] == "sync_session_context"
+    assert messages[2]["content"].startswith("<session_context>")
+    assert messages[3] == {"role": "user", "content": "earlier"}
+    assert messages[4] == {"role": "user", "content": "current task"}
 
 
 def test_default_prompt_builder_warns_when_memory_tools_are_absent(tmp_path, monkeypatch):
@@ -162,5 +160,6 @@ def test_prompt_builder_can_wrap_context_as_xml_later(tmp_path, monkeypatch):
 
     messages = PromptBuilder(context_format="xml").add_system_base("base").build_final_messages(context)
 
-    assert messages[1]["content"].startswith("<context_json>")
-    assert messages[-1]["content"].startswith("<current_task_json>")
+    assert messages[1]["tool_calls"][0]["function"]["name"] == "sync_session_context"
+    assert messages[2]["content"].startswith("<session_context>")
+    assert messages[-1] == {"role": "user", "content": "task"}

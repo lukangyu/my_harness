@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,6 +8,7 @@ from typing import Any, Callable, Protocol
 from coding_agent.context.assembler import ContextAssembler
 from coding_agent.context.context import UsageStats, WorkspaceContextOptions
 from coding_agent.context.prompt_builder import PromptBuilder, create_default_prompt_builder
+from coding_agent.context.virtual_tools import internal_tool_schemas
 from coding_agent.execution.executor import ToolExecutor
 from coding_agent.execution.tools import ToolRegistry
 from coding_agent.memory.store import MemoryStore
@@ -90,6 +90,7 @@ class AgentLoop:
     ) -> AgentResult:
         self._event("agent.run.start", "AgentLoop 开始执行任务", "run", {"mode": mode, "task_length": len(task)})
         tool_schemas = self.tools.schemas()
+        request_tool_schemas = [*tool_schemas, *internal_tool_schemas()]
         with self._span("构建上下文", "context", {"tool_count": len(tool_schemas)}):
             context = self.context_assembler.build(
                 task=task,
@@ -141,12 +142,7 @@ class AgentLoop:
             with self._span("渲染 prompt messages", "prompt"):
                 messages = self.prompt_builder.build_final_messages(context)
             extra_messages = deepcopy(turn_ctx.messages)
-            current_task_message = _pop_current_task_message(messages)
-            if current_task_message is not None:
-                messages.extend(extra_messages)
-                messages.append(current_task_message)
-            else:
-                messages.extend(extra_messages)
+            messages.extend(extra_messages)
             messages.extend(deepcopy(current_turn_tail))
             turn_ctx.messages = messages
             self._event(
@@ -156,7 +152,7 @@ class AgentLoop:
                 {"step": step, "message_count": len(messages)},
             )
             with self._span("调用大模型", "llm", {"step": step, "message_count": len(messages)}):
-                response = self.client.chat(messages, tool_schemas)
+                response = self.client.chat(messages, request_tool_schemas)
             turn_ctx.llm_response = response
             self.lifecycle.after_llm(turn_ctx)
             attempts += 1
@@ -256,21 +252,3 @@ class _NullSpan:
 
     def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> bool:
         return False
-
-
-def _pop_current_task_message(messages: list[dict[str, Any]]) -> dict[str, Any] | None:
-    if not messages:
-        return None
-    last_message = messages[-1]
-    content = last_message.get("content")
-    if last_message.get("role") != "user" or not isinstance(content, str):
-        return None
-    if "<current_task" in content:
-        return messages.pop()
-    try:
-        payload = json.loads(content)
-    except json.JSONDecodeError:
-        return None
-    if isinstance(payload, dict) and payload.get("kind") == "current_task":
-        return messages.pop()
-    return None

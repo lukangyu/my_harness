@@ -8,6 +8,7 @@ from coding_agent.execution.shell import ShellRunner
 from coding_agent.execution.tools import create_default_tools
 from coding_agent.hooks.compaction_hook import ContextCompactionHook
 from coding_agent.hooks.memory_hook import MemoryProjectionHook
+from coding_agent.hooks.memory_search_hook import MemorySearchHook
 from coding_agent.hooks.tool_result_offload_hook import ToolResultOffloadHook
 from coding_agent.memory.store import MemoryStore
 from coding_agent.orchestrator.agent_loop import AgentLoop
@@ -51,6 +52,10 @@ def lifecycle_registry(phase: str, hook: AgentLifecycleHook, *, order: int = 1) 
     registry = AgentLifecycleRegistry()
     registry.add(phase, hook, order=order)
     return registry
+
+
+def xml_json_payload(content: str, tag: str) -> dict:
+    return json.loads(content.removeprefix(f"<{tag}>\n").removesuffix(f"\n</{tag}>"))
 
 
 def test_lifecycle_registry_orders_hooks_within_each_phase():
@@ -122,8 +127,8 @@ def test_lifecycle_hook_can_modify_messages_before_llm(tmp_path):
     result = agent.run("inspect")
 
     assert result.final_answer == "answer"
-    assert client.calls[0]["messages"][-2] == {"role": "user", "content": "<dynamic_context>diff</dynamic_context>"}
-    assert json.loads(client.calls[0]["messages"][-1]["content"])["kind"] == "current_task"
+    assert client.calls[0]["messages"][-2] == {"role": "user", "content": "inspect"}
+    assert client.calls[0]["messages"][-1] == {"role": "user", "content": "<dynamic_context>diff</dynamic_context>"}
 
 
 def test_pre_llm_hook_receives_context_entity_before_prompt_build(tmp_path):
@@ -153,10 +158,10 @@ def test_pre_llm_hook_receives_context_entity_before_prompt_build(tmp_path):
     agent.run("inspect")
 
     assert seen == ["inspect"]
-    assert client.calls[0]["messages"][2]["role"] == "assistant"
-    assert client.calls[0]["messages"][2]["content"].startswith("[CONTEXT COMPACTION]")
-    assert "hook summary" in client.calls[0]["messages"][2]["content"]
-    assert json.loads(client.calls[0]["messages"][3]["content"])["kind"] == "current_task"
+    assert client.calls[0]["messages"][3]["tool_calls"][0]["function"]["name"] == "sync_compacted_context"
+    compacted_payload = xml_json_payload(client.calls[0]["messages"][4]["content"], "compacted_context")
+    assert "hook summary" in compacted_payload["compact_summary"]
+    assert client.calls[0]["messages"][-1] == {"role": "user", "content": "inspect"}
 
 
 def test_context_compaction_hook_leaves_large_tool_frames_to_execution_offload(tmp_path, monkeypatch):
@@ -179,7 +184,7 @@ def test_context_compaction_hook_leaves_large_tool_frames_to_execution_offload(t
 
     agent.run("inspect", prior_messages=prior)
 
-    tool_message = client.calls[0]["messages"][2]
+    tool_message = client.calls[0]["messages"][3]
     assert tool_message["content"] == "x" * 100
     assert not list(store.tool_result_dir.glob("*.txt"))
 
@@ -226,10 +231,9 @@ def test_context_compaction_hook_writes_structured_summary_to_handoff(tmp_path, 
     assert "## 关键决策" in compact_prompt
     assert "previous handoff" in compact_prompt
     assert store.read_handoff().strip() == summary
-    compacted_message = client.calls[0]["messages"][2]
-    assert compacted_message["role"] == "assistant"
-    assert compacted_message["content"].startswith("[CONTEXT COMPACTION]")
-    assert "## 目标\n继续任务" in compacted_message["content"]
+    assert client.calls[0]["messages"][3]["tool_calls"][0]["function"]["name"] == "sync_compacted_context"
+    compacted_payload = xml_json_payload(client.calls[0]["messages"][4]["content"], "compacted_context")
+    assert "## 目标\n继续任务" in compacted_payload["compact_summary"]
 
 
 def test_context_compaction_hook_writes_long_term_memories_from_json_payload(tmp_path, monkeypatch):
@@ -374,13 +378,80 @@ def test_context_compaction_hook_rotates_session_and_carries_scratchpad(tmp_path
     new_payload = json.loads(runtime.current.session_path.read_text(encoding="utf-8"))
     assert runtime.current.session_id != session.session_id
     assert old_payload["status"] == "compacted"
-    assert new_payload["messages"][0]["role"] == "assistant"
-    assert new_payload["messages"][0]["content"].startswith("[CONTEXT COMPACTION]")
-    assert new_payload["messages"][1:] == [{"role": "user", "content": "new"}]
+    assert new_payload["messages"] == [{"role": "user", "content": "new"}]
     assert json.loads((runtime.current.memory_dir / "scratchpad.json").read_text(encoding="utf-8"))[
         "active_todos"
     ] == ["next file"]
     assert (runtime.current.memory_dir / "handoff.md").read_text(encoding="utf-8").strip() == "## 目标\n继续任务"
+
+
+def test_memory_search_hook_injects_synthetic_pair_after_current_user(tmp_path, monkeypatch):
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent.resolve()))
+    store = MemoryStore(tmp_path)
+    store.append_long_term_memories(
+        [
+            {
+                "type": "procedural",
+                "content": "修改 prompt 组装后需要同步 prompt_builder 测试。",
+                "confidence": 0.9,
+                "reason": "测试直接约束消息顺序。",
+            }
+        ],
+        source="test",
+        evidence=["events.jsonl"],
+    )
+    client = FakeClient([{"message": {"role": "assistant", "content": "answer"}}])
+    agent = AgentLoop(
+        client,
+        make_tools(tmp_path),
+        max_steps=1,
+        cwd=tmp_path,
+        context_options=context_options(),
+        lifecycle_registry=lifecycle_registry("pre_llm", MemorySearchHook(store)),
+    )
+
+    result = agent.run("prompt 组装怎么改")
+
+    messages = client.calls[0]["messages"]
+    assert result.final_answer == "answer"
+    assert messages[-3] == {"role": "user", "content": "prompt 组装怎么改"}
+    assert messages[-2]["tool_calls"][0]["function"]["name"] == "auto_memory_search"
+    assert messages[-1]["name"] == "auto_memory_search"
+    memory_payload = xml_json_payload(messages[-1]["content"], "memory_search_results")
+    assert memory_payload["results"][0]["content"] == "修改 prompt 组装后需要同步 prompt_builder 测试。"
+    assert result.conversation_messages == [
+        {"role": "user", "content": "prompt 组装怎么改"},
+        {"role": "assistant", "content": "answer"},
+    ]
+
+
+def test_internal_virtual_tool_schemas_are_sent_but_not_user_registered(tmp_path):
+    client = FakeClient([{"message": {"role": "assistant", "content": "answer"}}])
+    tools = make_tools(tmp_path)
+    agent = AgentLoop(
+        client,
+        tools,
+        max_steps=1,
+        cwd=tmp_path,
+        context_options=context_options(),
+    )
+
+    agent.run("inspect")
+
+    request_tool_names = {
+        schema["function"]["name"]
+        for schema in client.calls[0]["tools"]
+        if isinstance(schema.get("function"), dict)
+    }
+    registered_tool_names = {
+        schema["function"]["name"]
+        for schema in tools.schemas()
+        if isinstance(schema.get("function"), dict)
+    }
+    assert "sync_session_context" in request_tool_names
+    assert "auto_memory_search" in request_tool_names
+    assert "sync_session_context" not in registered_tool_names
+    assert "auto_memory_search" not in registered_tool_names
 
 
 def test_lifecycle_hook_observes_llm_response(tmp_path):

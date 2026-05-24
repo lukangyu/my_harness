@@ -14,7 +14,8 @@
 - `read_file` 支持 `start_line` / `end_line`，默认 50KB 截断，并返回续读行号。
 - `search_text` 和 `session_search` 优先使用 `rg`，不可用时回退 Python 搜索。
 - phase/order 生命周期 Hook：按阶段编排上下文压缩、checkpoint、记忆投影和长输出 offload。
-- pre-LLM 上下文压缩：旧消息归档，新 session epoch 从 compact summary 继续。
+- pre-LLM 上下文压缩：旧消息归档，新 session epoch 通过 `sync_compacted_context` 前缀继续。
+- 自动长期记忆检索：当前用户请求后按需注入 `auto_memory_search` 虚拟工具结果。
 - conversation 级 checkpoint：写文件前确认 workspace、git 分支、HEAD 和目标文件 last-seen 状态，防止外部编辑被覆盖。
 - 长工具输出通过 `ToolResultOffloadHook` 转存到 `agent_context/tool_result/*.txt`。
 - session memory 只保留 `handoff.md` 和 `scratchpad.json`，不保存 file summary cache 或 tool index。
@@ -72,7 +73,7 @@ CLI
   -> CheckpointStore 刷新 conversation/checkpoints/checkpoint.json
   -> AgentLoop 构建 Context
   -> pre_llm hooks 必要时压缩并 rotate session
-  -> PromptBuilder 生成 messages
+  -> PromptBuilder 生成 cache-friendly messages
   -> LLM 返回 assistant 消息或 tool_calls
   -> ToolExecutor 触发 pre_tool hooks，执行工具
   -> after_tool pipeline 投影 scratchpad 并 offload 长结果
@@ -94,7 +95,7 @@ estimate_active_tokens > max_input_tokens * compact_threshold_ratio
 3. 压缩模型输出 JSON：`handoff` 和长期 `memories`。
 4. 旧 session 标记为 `compacted`。
 5. 新 session 创建为 `active`。
-6. 新 session 的 `session.json` 只包含 assistant compact summary 和 protected recent messages。
+6. 新 session 的 `session.json` 只包含 protected recent messages。
 7. 新 session 的 `memory/handoff.md` 写入 compact summary。
 8. 新 session 的 `memory/scratchpad.json` 从旧 session 完整复制。
 9. 长期 `memories` 追加写入 `conversation/memory/raw/YYYY-MM-DD.jsonl`。
@@ -135,6 +136,16 @@ estimate_active_tokens > max_input_tokens * compact_threshold_ratio
 ```
 
 如果压缩模型没有输出合法 JSON，系统会把响应 fallback 为 handoff，`memories=[]`，不会阻塞压缩。
+
+每轮用户请求确定后，`MemorySearchHook` 会用当前请求做轻量关键词检索。命中时，结果以已完成的 internal tool pair 注入：
+
+```text
+user: 当前用户原文
+assistant -> auto_memory_search({"query": "..."})
+tool      -> <memory_search_results>{...}</memory_search_results>
+```
+
+这对消息不写入真实 `session.json`，只作为本轮推理的派生上下文。
 
 ## session_search
 
