@@ -7,6 +7,12 @@ from coding_agent.context.context import Context
 from coding_agent.session import SessionRuntime
 
 
+class ToolVeto(Exception):
+    def __init__(self, result: dict[str, Any]) -> None:
+        super().__init__(str(result.get("error") or result.get("code") or "tool vetoed"))
+        self.result = result
+
+
 @dataclass
 class AgentTurnContext:
     run_id: str = ""

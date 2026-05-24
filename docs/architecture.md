@@ -5,10 +5,11 @@
 - **Orchestrator**：管理 run 生命周期和 LLM-Tool 循环。
 - **Context**：管理结构化上下文、压缩和最终 messages 编译。
 - **Execution**：执行工具调用，并用 sandbox/policy 限制副作用。
+- **Checkpoint**：保存 conversation 级工作区乐观锁，防止陈旧读取后的脏写。
 - **Memory**：保存 session 级 handoff 与 scratchpad。
 - **Telemetry**：保存 run 工件、events、trace 和 debug payload。
 
-设计原则：工具层只执行动作，Context 只保存数据，Memory 只存当前 session 的必要状态，Run artifacts 保存可审计原文。
+设计原则：工具层只执行动作，Context 只保存数据，Checkpoint 只做写前安全断言，Memory 只存当前 session 的必要状态，Run artifacts 保存可审计原文。
 
 ## 存储模型
 
@@ -17,6 +18,8 @@
   conversations/
     <conversation_id>/
       conversation.json
+      checkpoints/
+        checkpoint.json
       sessions/
         <session_id>/
           session.json
@@ -39,6 +42,7 @@
 语义：
 
 - `conversation`：长期任务线。
+- `checkpoint`：conversation 级工作区安全状态，跨 session rotation 保留。
 - `session`：上下文窗口 epoch。
 - `run`：一次 AgentLoop 执行。
 
@@ -61,8 +65,9 @@
 - 创建或恢复 `ConversationStore` / `SessionRef`
 - 将 `RunStore` 挂到 `session/runs`
 - 将 `MemoryStore` 挂到 `session/memory`
+- 将 `CheckpointStore` 挂到 `conversation/checkpoints`
 - 注册默认工具和 `session_search`
-- 注入 `ContextCompactionHook` 和 `MemoryProjectionHook`
+- 注入 `CheckpointHook`、`ContextCompactionHook` 和 `MemoryProjectionHook`
 - 创建 `AgentLoop` 与 `RunCoordinator`
 
 ### `session.py`
@@ -169,6 +174,7 @@ user: current task
 执行模型 tool call：
 
 - 解析 JSON arguments
+- 触发 `pre_tool`，允许 checkpoint veto 写操作
 - 调用 `ToolRegistry`
 - 触发 tool hooks
 - 生成 OpenAI tool message
@@ -179,6 +185,50 @@ user: current task
 ```text
 session/runs/<run_id>/tool_result/*.txt
 ```
+
+### `checkpoint/store.py`
+
+`CheckpointStore` 管理 conversation 级安全状态：
+
+```text
+conversation/checkpoints/checkpoint.json
+```
+
+它保存两类信息：
+
+- workspace identity：workspace root、git branch、HEAD、status、fingerprint。
+- file records：按相对路径 upsert 的 last-seen 记录，包含 `exists`、sha256、size、mtime、来源 run/session。
+
+删除文件不会移除记录，而是写 tombstone：
+
+```json
+{"path": "src/old.py", "exists": false, "content_hash": null}
+```
+
+Checkpoint 不进 prompt。它不是记忆系统，只在写工具执行前做系统级安全断言。
+
+### `checkpoint/hook.py`
+
+`CheckpointHook` 运行在 tool lifecycle：
+
+- `after_tool(read_file)`：记录模型最后一次看到的文件状态。
+- `pre_tool(write_file)`：校验 workspace 没漂移，目标文件未被外部修改。
+- `pre_tool(apply_patch)`：解析 patch 目标，校验 update/delete/move source 已读且未漂移，add/move target 不存在。
+- `after_tool(write_file/apply_patch)`：刷新相关 file records 和 workspace checkpoint。
+
+发生冲突时不执行真实写入，而是返回结构化 tool error：
+
+```json
+{
+  "ok": false,
+  "code": "file_drift_detected",
+  "path": "src/auth.py",
+  "error": "File changed after it was last read.",
+  "instruction": "Re-read this file with read_file before modifying it again."
+}
+```
+
+这条 tool error 会进入对话，迫使模型重新 `read_file`，基于用户最新修改重新生成补丁。
 
 ### `memory/store.py`
 
@@ -243,3 +293,4 @@ read_file(path=...)
 - active session 最后原子切换，避免中断产生悬空 session。
 - memory 只保留必要状态，避免派生缓存污染长期记忆。
 - `session_search` 默认限制在当前 conversation，避免跨任务污染。
+- Checkpoint 放在 conversation 下，压缩切新 session 后仍能保护同一条任务线里的文件写入。

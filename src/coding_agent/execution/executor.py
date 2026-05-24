@@ -4,7 +4,7 @@ import json
 from typing import Any, Callable
 
 from coding_agent.memory.store import MemoryStore
-from coding_agent.orchestrator.lifecycle import AgentLifecycleBus, AgentLifecycleHook, AgentTurnContext
+from coding_agent.orchestrator.lifecycle import AgentLifecycleBus, AgentLifecycleHook, AgentTurnContext, ToolVeto
 from coding_agent.runtime_events import RuntimeEvent
 from coding_agent.telemetry.logger import TelemetryLogger
 from coding_agent.execution.tools import ToolRegistry
@@ -48,6 +48,8 @@ class ToolExecutor:
             arguments = parsed_arguments
             self.lifecycle.pre_tool(ctx, name, arguments)
             result = self.tools.call(name, arguments)
+        except ToolVeto as veto:
+            result = veto.result
         except (json.JSONDecodeError, ValueError) as exc:
             result = {"ok": False, "error": f"Invalid JSON arguments: {exc}"}
         self.lifecycle.after_tool(ctx, name, arguments, result)

@@ -14,6 +14,7 @@
 - `read_file` 支持 `start_line` / `end_line`，默认 50KB 截断，并返回续读行号。
 - `search_text` 和 `session_search` 优先使用 `rg`，不可用时回退 Python 搜索。
 - pre-LLM 上下文压缩：旧消息归档，新 session epoch 从 compact summary 继续。
+- conversation 级 checkpoint：写文件前确认 workspace、git 分支、HEAD 和目标文件 last-seen 状态，防止外部编辑被覆盖。
 - 长工具输出执行期 offload 到 `tool_result/*.txt`。
 - session memory 只保留 `handoff.md` 和 `scratchpad.json`，不保存 file summary cache 或 tool index。
 
@@ -24,6 +25,8 @@
   conversations/
     <conversation_id>/
       conversation.json
+      checkpoints/
+        checkpoint.json
       sessions/
         <session_id>/
           session.json
@@ -46,6 +49,7 @@
 核心关系：
 
 - `conversation`：一条长期任务线。
+- `checkpoint`：一条 conversation 的工作区安全锁，压缩切 session 后仍保留。
 - `session`：一个上下文窗口 epoch。触发压缩后会创建新 session。
 - `run`：一次 AgentLoop 执行，挂在当前 session 下。
 
@@ -58,11 +62,12 @@ CLI
   -> Application 创建/恢复 conversation session
   -> RunStore 写入 active session/runs/<run_id>
   -> MemoryStore 写入 active session/memory
+  -> CheckpointStore 刷新 conversation/checkpoints/checkpoint.json
   -> AgentLoop 构建 Context
   -> pre_llm hooks 必要时压缩并 rotate session
   -> PromptBuilder 生成 messages
   -> LLM 返回 assistant 消息或 tool_calls
-  -> ToolExecutor 执行工具并 offload 长结果
+  -> ToolExecutor 写前触发 CheckpointHook，执行工具并 offload 长结果
   -> after_tool hooks 投影 scratchpad
   -> RunCoordinator 保存 active session messages
 ```
@@ -108,6 +113,35 @@ estimate_active_tokens > max_input_tokens * compact_threshold_ratio
 1. 模型发现当前上下文缺少旧决策。
 2. 调用 `session_search(query="关键字")` 定位归档路径。
 3. 用 `read_file(path=..., start_line=...)` 读取原文。
+
+## Checkpoint
+
+Checkpoint 是系统安全机制，不是模型记忆，也不会进入 prompt。
+
+它记录：
+
+- workspace identity：workspace root、git branch、HEAD、git status、fingerprint。
+- file records：模型通过 `read_file` 见过的文件状态，按路径替换更新。
+
+写入规则：
+
+- `write_file` 修改已存在文件前，必须确认该文件已被读过且内容没有漂移。
+- `apply_patch` 的 update/delete/move source 必须已读且未漂移。
+- `apply_patch` 的 add/move target 不能已经存在。
+- 删除文件会留下 `exists=false` tombstone，避免记录丢失。
+
+如果用户在 IDE 里改了文件，Agent 基于旧内容发起写入时，工具不会执行，而是返回结构化错误：
+
+```json
+{
+  "ok": false,
+  "code": "file_drift_detected",
+  "path": "src/auth.py",
+  "instruction": "Re-read this file with read_file before modifying it again."
+}
+```
+
+模型收到这个 tool error 后应重新 `read_file`，再基于最新内容生成修改。
 
 ## 配置
 

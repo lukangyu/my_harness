@@ -4,6 +4,8 @@ from pathlib import Path
 from typing import Callable
 
 from coding_agent.config import AppConfig
+from coding_agent.checkpoint.hook import CheckpointHook
+from coding_agent.checkpoint.store import CheckpointStore
 from coding_agent.context.context import WorkspaceContextOptions
 from coding_agent.context.assembler import ContextAssembler
 from coding_agent.context.prompt_builder import create_default_prompt_builder
@@ -78,6 +80,12 @@ class Application:
             dialog_dir=run_artifact.dialog_dir,
             tool_result_dir=run_artifact.tool_result_dir,
         )
+        checkpoint_store = CheckpointStore(
+            conversation_dir=session_ref.conversation_dir,
+            workspace_root=sandbox.root,
+            sandbox=sandbox,
+        )
+        checkpoint_store.refresh_workspace(run_id=run_artifact.run_id, session_id=session_ref.session_id)
         policy = CommandPolicy(allow=self.config.commands.allow, deny=self.config.commands.deny)
         shell = ShellRunner(policy=policy, cwd=sandbox.root, approval_callback=self.command_approval)
         tools = create_default_tools(sandbox, shell)
@@ -124,6 +132,7 @@ class Application:
             on_progress=coordinator.record_progress,
             on_runtime_event=self.on_runtime_event,
             lifecycle_hooks=[
+                CheckpointHook(checkpoint_store),
                 ContextCompactionHook(memory_store=memory_store, compact_client=client),
                 MemoryProjectionHook(memory_store),
                 *self.lifecycle_hooks,
