@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from coding_agent.sandbox import SandboxError, WorkspaceSandbox
+from coding_agent.execution.sandbox import SandboxError, WorkspaceSandbox
 
 
 def test_resolve_allows_project_file(tmp_path):

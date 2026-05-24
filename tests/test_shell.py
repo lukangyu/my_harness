@@ -1,9 +1,9 @@
 import subprocess
 import sys
 
-from coding_agent.policy import CommandPolicy
-from coding_agent import shell
-from coding_agent.shell import ShellRunner
+from coding_agent.execution.policy import CommandPolicy
+from coding_agent.execution import shell
+from coding_agent.execution.shell import ShellRunner
 
 
 def test_rejects_unlisted_command_without_executing(tmp_path):
@@ -17,6 +17,60 @@ def test_rejects_unlisted_command_without_executing(tmp_path):
     assert result.stdout == ""
     assert "not in allow list" in result.stderr
     assert not marker.exists()
+
+
+def test_unlisted_command_runs_when_human_approves(tmp_path):
+    marker = tmp_path / "marker.txt"
+    approvals = []
+
+    def approve(command, reason):
+        approvals.append({"command": command, "reason": reason})
+        return True
+
+    runner = ShellRunner(CommandPolicy(allow=[], deny=[]), cwd=tmp_path, approval_callback=approve)
+
+    result = runner.run(f"{sys.executable} -c \"from pathlib import Path; Path('marker.txt').write_text('ran')\"")
+
+    assert result.allowed is True
+    assert result.exit_code == 0
+    assert marker.read_text(encoding="utf-8") == "ran"
+    assert approvals == [
+        {
+            "command": f"{sys.executable} -c \"from pathlib import Path; Path('marker.txt').write_text('ran')\"",
+            "reason": "Command not in allow list",
+        }
+    ]
+
+
+def test_unlisted_command_does_not_run_when_human_denies(tmp_path):
+    marker = tmp_path / "marker.txt"
+    runner = ShellRunner(
+        CommandPolicy(allow=[], deny=[]),
+        cwd=tmp_path,
+        approval_callback=lambda command, reason: False,
+    )
+
+    result = runner.run(f"{sys.executable} -c \"from pathlib import Path; Path('marker.txt').write_text('ran')\"")
+
+    assert result.allowed is False
+    assert result.exit_code is None
+    assert "rejected by human approval" in result.stderr
+    assert not marker.exists()
+
+
+def test_denied_command_does_not_ask_for_human_approval(tmp_path):
+    approvals = []
+    runner = ShellRunner(
+        CommandPolicy(allow=[sys.executable], deny=[sys.executable]),
+        cwd=tmp_path,
+        approval_callback=lambda command, reason: approvals.append(command) or True,
+    )
+
+    result = runner.run(f"{sys.executable} --version")
+
+    assert result.allowed is False
+    assert "denied" in result.stderr.lower()
+    assert approvals == []
 
 
 def test_runs_allowed_command_in_cwd(tmp_path):

@@ -1,4 +1,4 @@
-from coding_agent.policy import CommandDecision, CommandPolicy
+from coding_agent.execution.policy import CommandDecision, CommandPolicy
 
 
 def test_allows_exact_command():

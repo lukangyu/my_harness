@@ -37,12 +37,35 @@ class CommandConfig:
 
 
 @dataclass(frozen=True)
+class ContextConfig:
+    max_input_tokens: int = 24000
+    reserved_output_tokens: int = 4000
+    recent_message_tokens: int = 12000
+    project_context_tokens: int = 4000
+    doc_max_chars: int = 1200
+    tree_max_entries: int = 200
+    include_project_docs: bool = True
+    include_file_tree: bool = True
+    include_git_status: bool = True
+    include_recent_commits: bool = True
+    restore_last_session: bool = False
+    show_cache_stats: bool = True
+    compact_threshold_ratio: float = 0.8
+    compact_tail_ratio: float = 0.2
+    protected_recent_turns: int = 4
+    protected_tool_results: int = 6
+    handoff_max_chars: int = 6000
+    scratchpad_max_chars: int = 4000
+
+
+@dataclass(frozen=True)
 class AppConfig:
     project_root: Path
     model: ModelConfig
     agent: AgentConfig
     workspace: WorkspaceConfig
     commands: CommandConfig
+    context: ContextConfig
 
 
 def load_config(project_root: Path) -> AppConfig:
@@ -61,6 +84,7 @@ def load_config(project_root: Path) -> AppConfig:
     agent_data = _required_table(data, "agent")
     workspace_data = _required_table(data, "workspace")
     command_data = _required_table(data, "commands")
+    context_data = _optional_table(data, "context")
 
     api_key_env = _required_str(model_data, "api_key_env", "model.api_key_env")
     try:
@@ -71,6 +95,118 @@ def load_config(project_root: Path) -> AppConfig:
     workspace_root = Path(_required_str(workspace_data, "root", "workspace.root"))
     if not workspace_root.is_absolute():
         workspace_root = project_root / workspace_root
+
+    context_defaults = ContextConfig()
+    context = ContextConfig(
+        max_input_tokens=_optional_int(
+            context_data,
+            "max_input_tokens",
+            context_defaults.max_input_tokens,
+            "context.max_input_tokens",
+        ),
+        reserved_output_tokens=_optional_int(
+            context_data,
+            "reserved_output_tokens",
+            context_defaults.reserved_output_tokens,
+            "context.reserved_output_tokens",
+        ),
+        recent_message_tokens=_optional_int(
+            context_data,
+            "recent_message_tokens",
+            context_defaults.recent_message_tokens,
+            "context.recent_message_tokens",
+        ),
+        project_context_tokens=_optional_int(
+            context_data,
+            "project_context_tokens",
+            context_defaults.project_context_tokens,
+            "context.project_context_tokens",
+        ),
+        doc_max_chars=_optional_int(
+            context_data,
+            "doc_max_chars",
+            context_defaults.doc_max_chars,
+            "context.doc_max_chars",
+        ),
+        tree_max_entries=_optional_int(
+            context_data,
+            "tree_max_entries",
+            context_defaults.tree_max_entries,
+            "context.tree_max_entries",
+        ),
+        include_project_docs=_optional_bool(
+            context_data,
+            "include_project_docs",
+            context_defaults.include_project_docs,
+            "context.include_project_docs",
+        ),
+        include_file_tree=_optional_bool(
+            context_data,
+            "include_file_tree",
+            context_defaults.include_file_tree,
+            "context.include_file_tree",
+        ),
+        include_git_status=_optional_bool(
+            context_data,
+            "include_git_status",
+            context_defaults.include_git_status,
+            "context.include_git_status",
+        ),
+        include_recent_commits=_optional_bool(
+            context_data,
+            "include_recent_commits",
+            context_defaults.include_recent_commits,
+            "context.include_recent_commits",
+        ),
+        restore_last_session=_optional_bool(
+            context_data,
+            "restore_last_session",
+            context_defaults.restore_last_session,
+            "context.restore_last_session",
+        ),
+        show_cache_stats=_optional_bool(
+            context_data,
+            "show_cache_stats",
+            context_defaults.show_cache_stats,
+            "context.show_cache_stats",
+        ),
+        compact_threshold_ratio=_optional_float(
+            context_data,
+            "compact_threshold_ratio",
+            context_defaults.compact_threshold_ratio,
+            "context.compact_threshold_ratio",
+        ),
+        compact_tail_ratio=_optional_float(
+            context_data,
+            "compact_tail_ratio",
+            context_defaults.compact_tail_ratio,
+            "context.compact_tail_ratio",
+        ),
+        protected_recent_turns=_optional_int(
+            context_data,
+            "protected_recent_turns",
+            context_defaults.protected_recent_turns,
+            "context.protected_recent_turns",
+        ),
+        protected_tool_results=_optional_int(
+            context_data,
+            "protected_tool_results",
+            context_defaults.protected_tool_results,
+            "context.protected_tool_results",
+        ),
+        handoff_max_chars=_optional_int(
+            context_data,
+            "handoff_max_chars",
+            context_defaults.handoff_max_chars,
+            "context.handoff_max_chars",
+        ),
+        scratchpad_max_chars=_optional_int(
+            context_data,
+            "scratchpad_max_chars",
+            context_defaults.scratchpad_max_chars,
+            "context.scratchpad_max_chars",
+        ),
+    )
 
     return AppConfig(
         project_root=project_root,
@@ -89,11 +225,19 @@ def load_config(project_root: Path) -> AppConfig:
             allow=_required_str_list(command_data, "allow", "commands.allow"),
             deny=_required_str_list(command_data, "deny", "commands.deny"),
         ),
+        context=context,
     )
 
 
 def _required_table(data: dict[str, Any], key: str) -> dict[str, Any]:
     value = _required_value(data, key)
+    if not isinstance(value, dict):
+        raise ConfigError(f"Configuration key {key} must be a table")
+    return value
+
+
+def _optional_table(data: dict[str, Any], key: str) -> dict[str, Any]:
+    value = data.get(key, {})
     if not isinstance(value, dict):
         raise ConfigError(f"Configuration key {key} must be a table")
     return value
@@ -122,8 +266,35 @@ def _required_int(data: dict[str, Any], key: str, display_key: str) -> int:
     return value
 
 
+def _optional_int(data: dict[str, Any], key: str, default: int, display_key: str) -> int:
+    if key not in data:
+        return default
+    value = data[key]
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ConfigError(f"Configuration key {display_key} must be an integer")
+    return value
+
+
+def _optional_float(data: dict[str, Any], key: str, default: float, display_key: str) -> float:
+    if key not in data:
+        return default
+    value = data[key]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigError(f"Configuration key {display_key} must be a number")
+    return float(value)
+
+
 def _required_bool(data: dict[str, Any], key: str, display_key: str) -> bool:
     value = _required_value(data, key)
+    if not isinstance(value, bool):
+        raise ConfigError(f"Configuration key {display_key} must be a boolean")
+    return value
+
+
+def _optional_bool(data: dict[str, Any], key: str, default: bool, display_key: str) -> bool:
+    if key not in data:
+        return default
+    value = data[key]
     if not isinstance(value, bool):
         raise ConfigError(f"Configuration key {display_key} must be a boolean")
     return value
