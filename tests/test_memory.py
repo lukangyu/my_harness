@@ -110,3 +110,46 @@ def test_memory_store_keeps_short_tool_result_inline(tmp_path):
     result = store.offload_tool_result(tool="read_file", content="short", max_inline_chars=100)
 
     assert result == {"content": "short", "offloaded": False}
+
+
+def test_memory_store_appends_long_term_memories_to_conversation_raw_jsonl(tmp_path):
+    conversation_memory_dir = tmp_path / ".coding-agent" / "conversations" / "c1" / "memory"
+    store = MemoryStore(tmp_path, conversation_memory_dir=conversation_memory_dir)
+
+    written = store.append_long_term_memories(
+        [
+            {
+                "type": "procedural",
+                "content": "修改工具 schema 后需要同步 tests/test_tools.py。",
+                "reason": "本轮修改工具参数后测试需要更新。",
+                "confidence": 0.8,
+            }
+        ],
+        source="context_compaction",
+        evidence=["sessions/s1/runs/r1/dialog/archive.jsonl"],
+    )
+
+    raw_files = list((conversation_memory_dir / "raw").glob("*.jsonl"))
+    assert len(raw_files) == 1
+    record = json.loads(raw_files[0].read_text(encoding="utf-8").strip())
+    assert written[0]["id"] == record["id"]
+    assert record["type"] == "procedural"
+    assert record["source"] == "context_compaction"
+    assert record["evidence"] == ["sessions/s1/runs/r1/dialog/archive.jsonl"]
+
+
+def test_memory_store_filters_invalid_long_term_memories(tmp_path):
+    store = MemoryStore(tmp_path, conversation_memory_dir=tmp_path / "conversation-memory")
+
+    written = store.append_long_term_memories(
+        [
+            {"type": "temporary", "content": "skip", "reason": "bad type", "confidence": 0.9},
+            {"type": "knowledge", "content": "", "reason": "empty", "confidence": 0.9},
+            {"type": "personal", "content": "用户偏好中文说明。", "reason": "明确要求", "confidence": 0.1},
+        ],
+        source="context_compaction",
+        evidence=[],
+    )
+
+    assert written == []
+    assert not (tmp_path / "conversation-memory" / "raw").exists()

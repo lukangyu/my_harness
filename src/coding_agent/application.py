@@ -79,6 +79,7 @@ class Application:
             memory_dir=session_ref.memory_dir,
             dialog_dir=run_artifact.dialog_dir,
             tool_result_dir=run_artifact.tool_result_dir,
+            conversation_memory_dir=session_ref.conversation_dir / "memory",
         )
         checkpoint_store = CheckpointStore(
             conversation_dir=session_ref.conversation_dir,

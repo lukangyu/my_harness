@@ -20,6 +20,9 @@
       conversation.json
       checkpoints/
         checkpoint.json
+      memory/
+        raw/
+          YYYY-MM-DD.jsonl
       sessions/
         <session_id>/
           session.json
@@ -43,6 +46,7 @@
 
 - `conversation`：长期任务线。
 - `checkpoint`：conversation 级工作区安全状态，跨 session rotation 保留。
+- `conversation/memory`：跨 session 的长期记忆候选，由压缩时提取。
 - `session`：上下文窗口 epoch。
 - `run`：一次 AgentLoop 执行。
 
@@ -135,10 +139,13 @@
 
 1. 切分旧历史和 protected recent messages。
 2. 归档旧消息到 `runs/<run_id>/dialog/*.jsonl`。
-3. 用压缩模型生成结构化 Markdown handoff。
+3. 用压缩模型生成 JSON：`handoff` 和长期 `memories`。
 4. 写当前 memory handoff。
-5. 将 compact summary 作为 assistant 消息插入 active history。
-6. 返回 `CompressionResult` 给 hook 做 session rotation。
+5. 将长期 memories 追加到 `conversation/memory/raw/YYYY-MM-DD.jsonl`。
+6. 将 compact summary 作为 assistant 消息插入 active history。
+7. 返回 `CompressionResult` 给 hook 做 session rotation。
+
+如果模型没有返回合法 JSON，压缩器会把原始文本当作 handoff，`memories=[]`，避免记忆提取失败阻塞上下文压缩。
 
 ### `context/prompt_builder.py`
 
@@ -241,6 +248,25 @@ memory/scratchpad.json
 
 `scratchpad.json` 保存当前 session 的结构化工作状态；压缩后完整 carry forward 到新 session。
 
+### `memory/stores/long_term.py`
+
+`LongTermMemoryStore` 管理 conversation 级长期记忆候选：
+
+```text
+conversation/memory/raw/YYYY-MM-DD.jsonl
+```
+
+每条记录包含：
+
+- `type`：`personal` / `procedural` / `knowledge`
+- `content`：独立可读的一句话记忆
+- `reason`：为什么值得长期保存
+- `confidence`：0 到 1
+- `source`：当前为 `context_compaction`
+- `evidence`：归档 dialog 路径
+
+长期记忆不默认进入 prompt；后续通过 `memory_search` 或 dream 整理再复用。
+
 ### `hooks/compaction_hook.py`
 
 `pre_llm` 阶段：
@@ -268,7 +294,8 @@ session A active
   │
   ├─ pre_llm 超限
   ├─ 旧消息归档到 session A/runs/<run_id>/dialog
-  ├─ 生成 compact summary
+  ├─ 生成 compact summary + long-term memories
+  ├─ memories 写入 conversation/memory/raw
   ├─ session A 标记 compacted
   ├─ 创建 session B
   ├─ session B 保存 summary + protected messages

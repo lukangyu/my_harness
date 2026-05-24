@@ -174,6 +174,109 @@ def test_context_compaction_hook_writes_structured_summary_to_handoff(tmp_path, 
     assert "## 目标\n继续任务" in compacted_message["content"]
 
 
+def test_context_compaction_hook_writes_long_term_memories_from_json_payload(tmp_path, monkeypatch):
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent.resolve()))
+    conversation_memory_dir = tmp_path / ".coding-agent" / "conversations" / "c1" / "memory"
+    store = MemoryStore(tmp_path, conversation_memory_dir=conversation_memory_dir)
+    compact_client = FakeClient(
+        [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": json.dumps(
+                        {
+                            "handoff": "## 目标\n继续任务\n\n## 下一步\n继续实现",
+                            "memories": [
+                                {
+                                    "type": "procedural",
+                                    "content": "修改压缩 prompt 后需要同步生命周期测试。",
+                                    "confidence": 0.8,
+                                    "reason": "本轮测试覆盖了压缩输出格式。",
+                                }
+                            ],
+                        },
+                        ensure_ascii=False,
+                    ),
+                }
+            }
+        ]
+    )
+    hook = ContextCompactionHook(memory_store=store, compact_client=compact_client)
+    client = FakeClient([{"message": {"role": "assistant", "content": "answer"}}])
+    agent = AgentLoop(
+        client,
+        make_tools(tmp_path),
+        max_steps=1,
+        cwd=tmp_path,
+        context_options=WorkspaceContextOptions(
+            include_project_docs=False,
+            include_file_tree=False,
+            include_git_status=False,
+            include_recent_commits=False,
+            max_input_tokens=80,
+            compact_threshold_ratio=0.1,
+            protected_recent_turns=1,
+        ),
+        lifecycle_hooks=[hook],
+    )
+
+    agent.run(
+        "inspect",
+        prior_messages=[
+            {"role": "user", "content": "old " + "x" * 100},
+            {"role": "assistant", "content": "old answer"},
+            {"role": "user", "content": "new"},
+        ],
+    )
+
+    raw_files = list((conversation_memory_dir / "raw").glob("*.jsonl"))
+    assert store.read_handoff().strip() == "## 目标\n继续任务\n\n## 下一步\n继续实现"
+    assert len(raw_files) == 1
+    record = json.loads(raw_files[0].read_text(encoding="utf-8").strip())
+    assert record["type"] == "procedural"
+    assert record["content"] == "修改压缩 prompt 后需要同步生命周期测试。"
+    assert record["source"] == "context_compaction"
+    assert record["evidence"] == [record["evidence"][0]]
+    assert record["evidence"][0].endswith(".jsonl")
+
+
+def test_context_compaction_falls_back_to_handoff_only_when_json_parse_fails(tmp_path, monkeypatch):
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent.resolve()))
+    conversation_memory_dir = tmp_path / ".coding-agent" / "conversations" / "c1" / "memory"
+    store = MemoryStore(tmp_path, conversation_memory_dir=conversation_memory_dir)
+    compact_client = FakeClient([{"message": {"role": "assistant", "content": "## 目标\n继续任务"}}])
+    hook = ContextCompactionHook(memory_store=store, compact_client=compact_client)
+    client = FakeClient([{"message": {"role": "assistant", "content": "answer"}}])
+    agent = AgentLoop(
+        client,
+        make_tools(tmp_path),
+        max_steps=1,
+        cwd=tmp_path,
+        context_options=WorkspaceContextOptions(
+            include_project_docs=False,
+            include_file_tree=False,
+            include_git_status=False,
+            include_recent_commits=False,
+            max_input_tokens=80,
+            compact_threshold_ratio=0.1,
+            protected_recent_turns=1,
+        ),
+        lifecycle_hooks=[hook],
+    )
+
+    agent.run(
+        "inspect",
+        prior_messages=[
+            {"role": "user", "content": "old " + "x" * 100},
+            {"role": "assistant", "content": "old answer"},
+            {"role": "user", "content": "new"},
+        ],
+    )
+
+    assert store.read_handoff().strip() == "## 目标\n继续任务"
+    assert not (conversation_memory_dir / "raw").exists()
+
+
 def test_context_compaction_hook_rotates_session_and_carries_scratchpad(tmp_path, monkeypatch):
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent.resolve()))
     conversation_store = ConversationStore(tmp_path)

@@ -27,6 +27,9 @@
       conversation.json
       checkpoints/
         checkpoint.json
+      memory/
+        raw/
+          YYYY-MM-DD.jsonl
       sessions/
         <session_id>/
           session.json
@@ -50,6 +53,7 @@
 
 - `conversation`：一条长期任务线。
 - `checkpoint`：一条 conversation 的工作区安全锁，压缩切 session 后仍保留。
+- `conversation/memory`：跨 session 的长期记忆候选，当前由压缩时顺带提取。
 - `session`：一个上下文窗口 epoch。触发压缩后会创建新 session。
 - `run`：一次 AgentLoop 执行，挂在当前 session 下。
 
@@ -84,15 +88,50 @@ estimate_active_tokens > max_input_tokens * compact_threshold_ratio
 
 1. 旧 session 保留完整 `session.json`。
 2. 被移出上下文的旧消息写入当前 run 的 `dialog/*.jsonl`。
-3. 压缩模型生成 Markdown handoff。
+3. 压缩模型输出 JSON：`handoff` 和长期 `memories`。
 4. 旧 session 标记为 `compacted`。
 5. 新 session 创建为 `active`。
 6. 新 session 的 `session.json` 只包含 assistant compact summary 和 protected recent messages。
 7. 新 session 的 `memory/handoff.md` 写入 compact summary。
 8. 新 session 的 `memory/scratchpad.json` 从旧 session 完整复制。
-9. `conversation.json.active_session_id` 最后原子切换到新 session。
+9. 长期 `memories` 追加写入 `conversation/memory/raw/YYYY-MM-DD.jsonl`。
+10. `conversation.json.active_session_id` 最后原子切换到新 session。
 
 这样压缩前后的完整消息不会混在同一个 session 里。
+
+## 长期记忆
+
+长期记忆是 conversation 级候选经验，不属于 session memory，也不会默认进入 prompt。
+
+当前只在上下文压缩时提取，不额外增加一轮 LLM 调用。压缩模型同时输出：
+
+```json
+{
+  "handoff": "给下一个 session 继续工作的 Markdown 摘要",
+  "memories": [
+    {
+      "type": "procedural",
+      "content": "修改工具 schema 后需要同步 tests/test_tools.py。",
+      "confidence": 0.8,
+      "reason": "这是项目内可复用的测试维护经验。"
+    }
+  ]
+}
+```
+
+记忆类型：
+
+- `personal`：用户稳定偏好、工作习惯、交流偏好。
+- `procedural`：可复用做事方法、踩坑教训、测试/验证流程。
+- `knowledge`：项目稳定事实、架构决策、目录结构、技术约束。
+
+写入格式：
+
+```text
+.coding-agent/conversations/<conversation_id>/memory/raw/YYYY-MM-DD.jsonl
+```
+
+如果压缩模型没有输出合法 JSON，系统会把响应 fallback 为 handoff，`memories=[]`，不会阻塞压缩。
 
 ## session_search
 

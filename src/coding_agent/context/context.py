@@ -486,7 +486,7 @@ def clear_old_tool_results(messages: list[dict[str, Any]]) -> list[dict[str, Any
     return cleared
 
 
-def build_handoff_prompt(
+def build_compaction_prompt(
     *,
     old_messages: list[dict[str, Any]],
     previous_handoff: str,
@@ -494,8 +494,25 @@ def build_handoff_prompt(
     source_refs: dict[str, str | None],
 ) -> str:
     return (
-        "你正在进行上下文检查点压缩。请为即将接手任务的下一个 LLM 实例生成一份清晰、精简、可执行的交接摘要。\n"
-        "必须使用下面的 Markdown 结构，只输出摘要正文，不要输出额外解释：\n\n"
+        "你是 coding-agent 的上下文压缩器和长期记忆提取器。\n"
+        "你的任务有两个：\n"
+        "1. 生成 handoff：给即将接手任务的下一个 LLM 实例使用，帮助它立刻继续当前任务。\n"
+        "2. 生成 memories：从同一批材料中提取少量长期有复用价值的记忆。\n\n"
+        "只输出一个 JSON 对象，不要输出 Markdown 代码块，不要输出解释文字。JSON 必须符合：\n"
+        "{\n"
+        '  "handoff": "string",\n'
+        '  "memories": [\n'
+        "    {\n"
+        '      "type": "personal | procedural | knowledge",\n'
+        '      "content": "string",\n'
+        '      "confidence": 0.0,\n'
+        '      "reason": "string"\n'
+        "    }\n"
+        "  ]\n"
+        "}\n\n"
+        "handoff 要求：\n"
+        "- handoff 用 Markdown 写，且优先级高于 memories；不要为了生成 memories 牺牲 handoff 完整性。\n"
+        "- 必须包含下面结构：\n\n"
         "## 目标\n"
         "[用户正在完成什么]\n\n"
         "## 约束与偏好\n"
@@ -515,7 +532,18 @@ def build_handoff_prompt(
         "[下一步应该做什么]\n\n"
         "## 关键上下文\n"
         "[错误信息、配置值、路径、测试结果等必须保留的细节]\n\n"
-        "如果 previous_handoff 中已有摘要，请更新它：保留仍然有效的信息，移除过时信息，并合并 old_messages 的新增进展。\n\n"
+        "- 如果 previous_handoff 中已有摘要，请更新它：保留仍然有效的信息，移除过时信息，并合并 old_messages 的新增进展。\n"
+        "- 如果 source_refs 中存在 archive/dialog 路径，在 handoff 中保留路径引用，方便后续 read_file 回溯。\n\n"
+        "memories 要求：\n"
+        "- 只记录长期有复用价值的信息。如果没有长期价值，返回空数组 []。\n"
+        "- 不要记录普通执行流水、临时文件列表、一次性进度、普通工具调用结果、大段代码或日志。\n"
+        "- 不要把 handoff 的内容机械复制进 memories。\n"
+        "- 不要记录敏感信息、密钥、token 或个人隐私，除非用户明确要求保存。\n"
+        "- 每条 memory 必须独立可读，不能写“如上”“本轮”等依赖上下文的表达。\n"
+        "- content 要简洁，优先一句话；reason 说明为什么值得长期保存；confidence 必须是 0 到 1。\n"
+        "- personal：用户稳定偏好、工作习惯、交流偏好、明确要求。\n"
+        "- procedural：可复用做事方法、踩坑教训、测试/验证流程、下次应遵守的规则。\n"
+        "- knowledge：项目稳定事实、架构决策、目录结构、技术约束。\n\n"
         "<source_refs>\n"
         f"{json.dumps(source_refs, ensure_ascii=False)}\n"
         "</source_refs>\n\n"
@@ -528,6 +556,21 @@ def build_handoff_prompt(
         "<old_messages_json>\n"
         f"{json.dumps(old_messages, ensure_ascii=False)}\n"
         "</old_messages_json>"
+    )
+
+
+def build_handoff_prompt(
+    *,
+    old_messages: list[dict[str, Any]],
+    previous_handoff: str,
+    scratchpad: dict[str, Any],
+    source_refs: dict[str, str | None],
+) -> str:
+    return build_compaction_prompt(
+        old_messages=old_messages,
+        previous_handoff=previous_handoff,
+        scratchpad=scratchpad,
+        source_refs=source_refs,
     )
 
 

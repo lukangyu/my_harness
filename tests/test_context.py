@@ -11,6 +11,7 @@ from coding_agent.context.context import (
     estimate_tokens,
 )
 from coding_agent.context.assembler import ContextAssembler
+from coding_agent.context.compressor import parse_compaction_response
 from coding_agent.memory.store import MemoryStore
 
 
@@ -225,6 +226,43 @@ def test_context_assembler_pushes_memory_as_raw_structured_data(tmp_path, monkey
     assert frames["handoff"].payload["text"] == "handoff text"
     assert "file_summaries" not in frames
     assert "<memory_anchor>" not in json.dumps([frame.payload for frame in context.frames()])
+
+
+def test_parse_compaction_response_accepts_handoff_and_memories_json():
+    payload = parse_compaction_response(
+        json.dumps(
+            {
+                "handoff": "## 目标\n继续任务",
+                "memories": [
+                    {
+                        "type": "procedural",
+                        "content": "修改工具 schema 后需要同步 tests/test_tools.py。",
+                        "confidence": 0.8,
+                        "reason": "这是可复用的测试维护经验。",
+                    },
+                    {"type": "temporary", "content": "skip", "confidence": 0.8, "reason": "bad type"},
+                ],
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    assert payload.handoff == "## 目标\n继续任务"
+    assert payload.memories == [
+        {
+            "type": "procedural",
+            "content": "修改工具 schema 后需要同步 tests/test_tools.py。",
+            "confidence": 0.8,
+            "reason": "这是可复用的测试维护经验。",
+        }
+    ]
+
+
+def test_parse_compaction_response_falls_back_to_handoff_only():
+    payload = parse_compaction_response("## 目标\n继续任务")
+
+    assert payload.handoff == "## 目标\n继续任务"
+    assert payload.memories == []
 
 
 class CompactClient:
