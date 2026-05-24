@@ -71,7 +71,7 @@
 - 将 `MemoryStore` 挂到 `session/memory`
 - 将 `CheckpointStore` 挂到 `conversation/checkpoints`
 - 注册默认工具和 `session_search`
-- 注入 `CheckpointHook`、`ContextCompactionHook` 和 `MemoryProjectionHook`
+- 通过 `AgentLifecycleRegistry` 按 phase/order 注册 `CheckpointHook`、`ContextCompactionHook`、`MemoryProjectionHook` 和 `ToolResultOffloadHook`
 - 创建 `AgentLoop` 与 `RunCoordinator`
 
 ### `session.py`
@@ -105,6 +105,26 @@
 5. 执行工具调用
 6. 追加 tool messages
 7. 返回最终答案或达到 max steps
+
+### `orchestrator/lifecycle.py`
+
+生命周期 Hook 容器：
+
+- `AgentLifecycleRegistry` 按 phase 注册 hook。
+- `HookRegistration.order` 只在当前 phase 内生效。
+- 相同 order 保留注册顺序。
+- `after_tool` 是流水线阶段，hook 可以返回新的 result 交给后续 hook 和最终 tool message。
+
+当前 phase：
+
+```text
+on_turn_start
+pre_llm
+after_llm
+pre_tool
+after_tool
+on_turn_end
+```
 
 ### `orchestrator/coordinator.py`
 
@@ -183,15 +203,20 @@ user: current task
 - 解析 JSON arguments
 - 触发 `pre_tool`，允许 checkpoint veto 写操作
 - 调用 `ToolRegistry`
-- 触发 tool hooks
+- 触发 `after_tool` 流水线 hooks
 - 生成 OpenAI tool message
-- 对超长 tool result 做执行期 offload
 
-超长输出写到：
+`ToolExecutor` 不直接写 memory 或 telemetry；长输出 offload 由 `ToolResultOffloadHook` 负责。
+
+### `hooks/tool_result_offload_hook.py`
+
+`after_tool` 阶段靠后执行，把超长 tool result 转存到：
 
 ```text
 session/runs/<run_id>/tool_result/*.txt
 ```
+
+最终返回给模型的 tool message 只保留 preview、路径和读取指引。
 
 ### `checkpoint/store.py`
 

@@ -8,9 +8,10 @@ from coding_agent.execution.shell import ShellRunner
 from coding_agent.execution.tools import create_default_tools
 from coding_agent.hooks.compaction_hook import ContextCompactionHook
 from coding_agent.hooks.memory_hook import MemoryProjectionHook
+from coding_agent.hooks.tool_result_offload_hook import ToolResultOffloadHook
 from coding_agent.memory.store import MemoryStore
 from coding_agent.orchestrator.agent_loop import AgentLoop
-from coding_agent.orchestrator.lifecycle import AgentLifecycleHook, AgentTurnContext
+from coding_agent.orchestrator.lifecycle import AgentLifecycleBus, AgentLifecycleHook, AgentLifecycleRegistry, AgentTurnContext
 from coding_agent.session import ConversationStore, SessionRuntime
 
 
@@ -46,6 +47,63 @@ def tool_call(name, arguments, call_id="call_1"):
     }
 
 
+def lifecycle_registry(phase: str, hook: AgentLifecycleHook, *, order: int = 1) -> AgentLifecycleRegistry:
+    registry = AgentLifecycleRegistry()
+    registry.add(phase, hook, order=order)
+    return registry
+
+
+def test_lifecycle_registry_orders_hooks_within_each_phase():
+    events = []
+
+    class Hook(AgentLifecycleHook):
+        def __init__(self, name):
+            self.name = name
+
+        def pre_llm(self, ctx):
+            events.append(("pre_llm", self.name))
+
+        def pre_tool(self, ctx, tool_name, args):
+            events.append(("pre_tool", self.name))
+
+    registry = AgentLifecycleRegistry()
+    registry.add("pre_llm", Hook("late-pre-llm"), order=20)
+    registry.add("pre_llm", Hook("early-pre-llm"), order=1)
+    registry.add("pre_tool", Hook("early-pre-tool"), order=1)
+    registry.add("pre_tool", Hook("late-pre-tool"), order=20)
+    bus = AgentLifecycleBus(registry)
+
+    bus.pre_llm(AgentTurnContext())
+    bus.pre_tool(AgentTurnContext(), "read_file", {})
+
+    assert events == [
+        ("pre_llm", "early-pre-llm"),
+        ("pre_llm", "late-pre-llm"),
+        ("pre_tool", "early-pre-tool"),
+        ("pre_tool", "late-pre-tool"),
+    ]
+
+
+def test_after_tool_pipeline_passes_transformed_result_to_later_hooks():
+    seen = []
+
+    class TransformHook(AgentLifecycleHook):
+        def after_tool(self, ctx, tool_name, args, result):
+            return {**result, "transformed": True}
+
+    class ObserveHook(AgentLifecycleHook):
+        def after_tool(self, ctx, tool_name, args, result):
+            seen.append(dict(result))
+
+    registry = AgentLifecycleRegistry()
+    registry.add("after_tool", TransformHook(), order=1)
+    registry.add("after_tool", ObserveHook(), order=2)
+    result = AgentLifecycleBus(registry).after_tool(AgentTurnContext(), "tool", {}, {"ok": True})
+
+    assert result == {"ok": True, "transformed": True}
+    assert seen == [{"ok": True, "transformed": True}]
+
+
 def test_lifecycle_hook_can_modify_messages_before_llm(tmp_path):
     class AppendMessageHook(AgentLifecycleHook):
         def pre_llm(self, ctx: AgentTurnContext) -> None:
@@ -58,7 +116,7 @@ def test_lifecycle_hook_can_modify_messages_before_llm(tmp_path):
         max_steps=1,
         cwd=tmp_path,
         context_options=context_options(),
-        lifecycle_hooks=[AppendMessageHook()],
+        lifecycle_registry=lifecycle_registry("pre_llm", AppendMessageHook()),
     )
 
     result = agent.run("inspect")
@@ -89,7 +147,7 @@ def test_pre_llm_hook_receives_context_entity_before_prompt_build(tmp_path):
         max_steps=1,
         cwd=tmp_path,
         context_options=context_options(),
-        lifecycle_hooks=[ContextHook()],
+        lifecycle_registry=lifecycle_registry("pre_llm", ContextHook()),
     )
 
     agent.run("inspect")
@@ -115,7 +173,7 @@ def test_context_compaction_hook_leaves_large_tool_frames_to_execution_offload(t
         max_steps=1,
         cwd=tmp_path,
         context_options=context_options(),
-        lifecycle_hooks=[hook],
+        lifecycle_registry=lifecycle_registry("pre_llm", hook),
     )
     prior = [{"role": "tool", "tool_call_id": "call-1", "name": "read_file", "content": "x" * 100}]
 
@@ -153,7 +211,7 @@ def test_context_compaction_hook_writes_structured_summary_to_handoff(tmp_path, 
             compact_threshold_ratio=0.1,
             protected_recent_turns=1,
         ),
-        lifecycle_hooks=[hook],
+        lifecycle_registry=lifecycle_registry("pre_llm", hook),
     )
     prior = [
         {"role": "user", "content": "old " + "x" * 100},
@@ -217,7 +275,7 @@ def test_context_compaction_hook_writes_long_term_memories_from_json_payload(tmp
             compact_threshold_ratio=0.1,
             protected_recent_turns=1,
         ),
-        lifecycle_hooks=[hook],
+        lifecycle_registry=lifecycle_registry("pre_llm", hook),
     )
 
     agent.run(
@@ -261,7 +319,7 @@ def test_context_compaction_falls_back_to_handoff_only_when_json_parse_fails(tmp
             compact_threshold_ratio=0.1,
             protected_recent_turns=1,
         ),
-        lifecycle_hooks=[hook],
+        lifecycle_registry=lifecycle_registry("pre_llm", hook),
     )
 
     agent.run(
@@ -301,7 +359,7 @@ def test_context_compaction_hook_rotates_session_and_carries_scratchpad(tmp_path
             compact_threshold_ratio=0.1,
             protected_recent_turns=1,
         ),
-        lifecycle_hooks=[hook],
+        lifecycle_registry=lifecycle_registry("pre_llm", hook),
         session_runtime=runtime,
     )
     prior = [
@@ -339,7 +397,7 @@ def test_lifecycle_hook_observes_llm_response(tmp_path):
         max_steps=1,
         cwd=tmp_path,
         context_options=context_options(),
-        lifecycle_hooks=[CaptureResponseHook()],
+        lifecycle_registry=lifecycle_registry("after_llm", CaptureResponseHook()),
     )
 
     agent.run("inspect")
@@ -357,7 +415,11 @@ def test_tool_executor_returns_clean_tool_message_and_runs_tool_hooks(tmp_path):
         def after_tool(self, ctx, tool_name, args, result):
             events.append(("after", tool_name, result.get("ok")))
 
-    executor = ToolExecutor(make_tools(tmp_path), lifecycle_hooks=[ToolHook()])
+    registry = AgentLifecycleRegistry()
+    tool_hook = ToolHook()
+    registry.add("pre_tool", tool_hook, order=1)
+    registry.add("after_tool", tool_hook, order=1)
+    executor = ToolExecutor(make_tools(tmp_path), lifecycle=AgentLifecycleBus(registry))
     ctx = AgentTurnContext(turn_index=1)
 
     message = executor.execute(
@@ -384,7 +446,7 @@ def test_memory_projection_hook_records_tool_results_after_execution(tmp_path):
     store = MemoryStore(tmp_path)
     executor = ToolExecutor(
         make_tools(tmp_path),
-        lifecycle_hooks=[MemoryProjectionHook(store)],
+        lifecycle=AgentLifecycleBus(lifecycle_registry("after_tool", MemoryProjectionHook(store))),
     )
     ctx = AgentTurnContext(turn_index=1)
 
@@ -397,3 +459,25 @@ def test_memory_projection_hook_records_tool_results_after_execution(tmp_path):
     assert "notes.txt" in scratchpad["modified_files"]
     assert not (store.memory_dir / "file_summaries.json").exists()
     assert not (store.memory_dir / "tool_index.jsonl").exists()
+
+
+def test_tool_result_offload_hook_transforms_large_tool_message_after_memory_projection(tmp_path):
+    store = MemoryStore(tmp_path)
+    (tmp_path / "large.txt").write_text("x" * 5000, encoding="utf-8")
+    registry = AgentLifecycleRegistry()
+    registry.add("after_tool", MemoryProjectionHook(store), order=1)
+    registry.add("after_tool", ToolResultOffloadHook(store, max_inline_chars=200), order=90)
+    executor = ToolExecutor(make_tools(tmp_path), lifecycle=AgentLifecycleBus(registry))
+
+    message = executor.execute(
+        tool_call("read_file", json.dumps({"path": "large.txt", "max_chars": 5000})),
+        AgentTurnContext(turn_index=1),
+    )
+
+    content = json.loads(message["content"])
+    scratchpad = store.load_scratchpad()
+    assert content["offloaded"] is True
+    assert content["path"].endswith(".txt")
+    assert "Full tool output is archived" in content["instruction"]
+    assert (tmp_path / content["path"]).exists()
+    assert scratchpad["read_files"] == ["large.txt"]

@@ -3,8 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any, Callable
 
-from coding_agent.memory.store import MemoryStore
-from coding_agent.orchestrator.lifecycle import AgentLifecycleBus, AgentLifecycleHook, AgentTurnContext, ToolVeto
+from coding_agent.orchestrator.lifecycle import AgentLifecycleBus, AgentTurnContext, ToolVeto
 from coding_agent.runtime_events import RuntimeEvent
 from coding_agent.telemetry.logger import TelemetryLogger
 from coding_agent.execution.tools import ToolRegistry
@@ -15,18 +14,16 @@ class ToolExecutor:
         self,
         tools: ToolRegistry,
         *,
-        lifecycle_hooks: list[AgentLifecycleHook] | None = None,
+        lifecycle: AgentLifecycleBus | None = None,
         on_tool_call: Callable[[dict[str, Any]], None] | None = None,
         on_runtime_event: Callable[[RuntimeEvent], None] | None = None,
         telemetry: TelemetryLogger | None = None,
-        memory_store: MemoryStore | None = None,
     ) -> None:
         self.tools = tools
-        self.lifecycle = AgentLifecycleBus(lifecycle_hooks)
+        self.lifecycle = lifecycle or AgentLifecycleBus()
         self.on_tool_call = on_tool_call
         self.on_runtime_event = on_runtime_event
         self.telemetry = telemetry
-        self.memory_store = memory_store
 
     def execute(self, tool_call: dict[str, Any], ctx: AgentTurnContext) -> dict[str, Any]:
         if self.on_tool_call is not None:
@@ -52,7 +49,7 @@ class ToolExecutor:
             result = veto.result
         except (json.JSONDecodeError, ValueError) as exc:
             result = {"ok": False, "error": f"Invalid JSON arguments: {exc}"}
-        self.lifecycle.after_tool(ctx, name, arguments, result)
+        result = self.lifecycle.after_tool(ctx, name, arguments, result)
         self._runtime_event(
             RuntimeEvent(
                 type="tool.result",
@@ -61,16 +58,6 @@ class ToolExecutor:
             )
         )
         tool_content = json.dumps(result, ensure_ascii=False)
-        if self.memory_store is not None:
-            offload = self.memory_store.offload_tool_result(tool=name, content=tool_content)
-            tool_content = offload["content"]
-            if offload.get("offloaded"):
-                self._event(
-                    "tool.result.offload",
-                    f"工具 {name} 的长输出已转存到文件",
-                    "tool",
-                    {"tool": name, "path": offload.get("path"), "original_chars": offload.get("original_chars")},
-                )
         self._event(
             "agent.tool_message.end",
             f"工具调用 {name} 的 tool message 已生成",

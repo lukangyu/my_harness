@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -24,14 +25,14 @@ class ScratchpadStore:
 
     def load(self) -> dict[str, Any]:
         if not self.path.exists():
-            return dict(DEFAULT_SCRATCHPAD)
+            return deepcopy(DEFAULT_SCRATCHPAD)
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            return dict(DEFAULT_SCRATCHPAD)
+            return deepcopy(DEFAULT_SCRATCHPAD)
         if not isinstance(data, dict):
-            return dict(DEFAULT_SCRATCHPAD)
-        scratchpad = dict(DEFAULT_SCRATCHPAD)
+            return deepcopy(DEFAULT_SCRATCHPAD)
+        scratchpad = deepcopy(DEFAULT_SCRATCHPAD)
         scratchpad.update(data)
         return scratchpad
 
@@ -44,7 +45,7 @@ class ScratchpadStore:
 
 
 def normalize_scratchpad(scratchpad: dict[str, Any]) -> dict[str, Any]:
-    normalized = dict(DEFAULT_SCRATCHPAD)
+    normalized = deepcopy(DEFAULT_SCRATCHPAD)
     normalized.update(scratchpad)
     for key in (
         "user_preferences",

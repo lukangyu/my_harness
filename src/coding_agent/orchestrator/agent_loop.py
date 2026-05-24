@@ -12,7 +12,7 @@ from coding_agent.context.prompt_builder import PromptBuilder, create_default_pr
 from coding_agent.execution.executor import ToolExecutor
 from coding_agent.execution.tools import ToolRegistry
 from coding_agent.memory.store import MemoryStore
-from coding_agent.orchestrator.lifecycle import AgentLifecycleBus, AgentLifecycleHook, AgentTurnContext
+from coding_agent.orchestrator.lifecycle import AgentLifecycleBus, AgentLifecycleRegistry, AgentTurnContext
 from coding_agent.runtime_events import RuntimeEvent
 from coding_agent.session import SessionRuntime
 from coding_agent.telemetry.logger import TelemetryLogger
@@ -50,7 +50,7 @@ class AgentLoop:
         on_runtime_event: Callable[[RuntimeEvent], None] | None = None,
         telemetry: TelemetryLogger | None = None,
         memory_store: MemoryStore | None = None,
-        lifecycle_hooks: list[AgentLifecycleHook] | None = None,
+        lifecycle_registry: AgentLifecycleRegistry | None = None,
         prompt_builder: PromptBuilder | None = None,
         context_assembler: ContextAssembler | None = None,
         session_runtime: SessionRuntime | None = None,
@@ -63,8 +63,7 @@ class AgentLoop:
         self.on_runtime_event = on_runtime_event
         self.telemetry = telemetry
         self.memory_store = memory_store
-        self.lifecycle_hooks = list(lifecycle_hooks or [])
-        self.lifecycle = AgentLifecycleBus(self.lifecycle_hooks)
+        self.lifecycle = AgentLifecycleBus(lifecycle_registry)
         self.cwd = cwd
         self.context_options = context_options or WorkspaceContextOptions()
         self.recent_message_tokens = recent_message_tokens
@@ -77,11 +76,10 @@ class AgentLoop:
         self.session_runtime = session_runtime
         self.tool_executor = ToolExecutor(
             tools,
-            lifecycle_hooks=self.lifecycle_hooks,
+            lifecycle=self.lifecycle,
             on_tool_call=on_tool_call,
             on_runtime_event=on_runtime_event,
             telemetry=telemetry,
-            memory_store=memory_store,
         )
 
     def run(

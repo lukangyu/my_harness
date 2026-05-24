@@ -7,7 +7,7 @@ from coding_agent.execution.policy import CommandPolicy
 from coding_agent.execution.sandbox import WorkspaceSandbox
 from coding_agent.execution.shell import ShellRunner
 from coding_agent.execution.tools import create_default_tools
-from coding_agent.orchestrator.lifecycle import AgentTurnContext
+from coding_agent.orchestrator.lifecycle import AgentLifecycleBus, AgentLifecycleRegistry, AgentTurnContext
 from coding_agent.session import ConversationStore
 
 
@@ -21,7 +21,11 @@ def make_executor(tmp_path):
     )
     shell = ShellRunner(CommandPolicy(allow=[], deny=[]), cwd=sandbox.root)
     tools = create_default_tools(sandbox, shell)
-    executor = ToolExecutor(tools, lifecycle_hooks=[CheckpointHook(store)])
+    registry = AgentLifecycleRegistry()
+    hook = CheckpointHook(store)
+    registry.add("pre_tool", hook, order=1)
+    registry.add("after_tool", hook, order=1)
+    executor = ToolExecutor(tools, lifecycle=AgentLifecycleBus(registry))
     ctx = AgentTurnContext(run_id="run-1", session_id=session.session_id)
     return executor, store, ctx
 

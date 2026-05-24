@@ -15,11 +15,12 @@ from coding_agent.execution.shell import ShellRunner
 from coding_agent.execution.tools import create_default_tools, register_session_search_tool
 from coding_agent.hooks.compaction_hook import ContextCompactionHook
 from coding_agent.hooks.memory_hook import MemoryProjectionHook
+from coding_agent.hooks.tool_result_offload_hook import ToolResultOffloadHook
 from coding_agent.llm import OpenAICompatibleClient
 from coding_agent.memory.store import MemoryStore
 from coding_agent.orchestrator.agent_loop import AgentLoop
 from coding_agent.orchestrator.coordinator import RunCoordinator
-from coding_agent.orchestrator.lifecycle import AgentLifecycleHook
+from coding_agent.orchestrator.lifecycle import AgentLifecycleRegistry
 from coding_agent.run_result import RunTaskResult
 from coding_agent.runtime_events import RuntimeEvent
 from coding_agent.session import ConversationStore, SessionRef, SessionRuntime
@@ -42,14 +43,14 @@ class Application:
         on_tool_call: ToolPrinter | None = None,
         on_runtime_event: RuntimeEventPrinter | None = None,
         command_approval: CommandApproval | None = None,
-        lifecycle_hooks: list[AgentLifecycleHook] | None = None,
+        lifecycle_registry: AgentLifecycleRegistry | None = None,
     ) -> None:
         self.config = config
         self.on_reasoning_delta = on_reasoning_delta
         self.on_tool_call = on_tool_call
         self.on_runtime_event = on_runtime_event
         self.command_approval = command_approval
-        self.lifecycle_hooks = list(lifecycle_hooks or [])
+        self.lifecycle_registry = lifecycle_registry
 
     def run_task(
         self,
@@ -115,6 +116,22 @@ class Application:
             memory_store=memory_store,
             session_runtime=session_runtime,
         )
+        lifecycle_registry = AgentLifecycleRegistry()
+        lifecycle_registry.add("pre_tool", CheckpointHook(checkpoint_store), order=1)
+        lifecycle_registry.add(
+            "pre_llm",
+            ContextCompactionHook(memory_store=memory_store, compact_client=client),
+            order=1,
+        )
+        lifecycle_registry.add("after_tool", MemoryProjectionHook(memory_store), order=1)
+        lifecycle_registry.add(
+            "after_tool",
+            ToolResultOffloadHook(memory_store, telemetry=telemetry),
+            order=90,
+        )
+        if self.lifecycle_registry is not None:
+            for registration in self.lifecycle_registry.registrations():
+                lifecycle_registry.add(registration.phase, registration.hook, order=registration.order)
         agent = AgentLoop(
             client=client,
             tools=tools,
@@ -132,12 +149,7 @@ class Application:
             ),
             on_progress=coordinator.record_progress,
             on_runtime_event=self.on_runtime_event,
-            lifecycle_hooks=[
-                CheckpointHook(checkpoint_store),
-                ContextCompactionHook(memory_store=memory_store, compact_client=client),
-                MemoryProjectionHook(memory_store),
-                *self.lifecycle_hooks,
-            ],
+            lifecycle_registry=lifecycle_registry,
             prompt_builder=create_default_prompt_builder(),
             session_runtime=session_runtime,
         )

@@ -13,9 +13,10 @@
 - 内置工具：`list_files`、`read_file`、`write_file`、`search_text`、`apply_patch`、`run_shell`、`session_search`。
 - `read_file` 支持 `start_line` / `end_line`，默认 50KB 截断，并返回续读行号。
 - `search_text` 和 `session_search` 优先使用 `rg`，不可用时回退 Python 搜索。
+- phase/order 生命周期 Hook：按阶段编排上下文压缩、checkpoint、记忆投影和长输出 offload。
 - pre-LLM 上下文压缩：旧消息归档，新 session epoch 从 compact summary 继续。
 - conversation 级 checkpoint：写文件前确认 workspace、git 分支、HEAD 和目标文件 last-seen 状态，防止外部编辑被覆盖。
-- 长工具输出执行期 offload 到 `tool_result/*.txt`。
+- 长工具输出通过 `ToolResultOffloadHook` 转存到 `tool_result/*.txt`。
 - session memory 只保留 `handoff.md` 和 `scratchpad.json`，不保存 file summary cache 或 tool index。
 
 ## 存储结构
@@ -71,8 +72,8 @@ CLI
   -> pre_llm hooks 必要时压缩并 rotate session
   -> PromptBuilder 生成 messages
   -> LLM 返回 assistant 消息或 tool_calls
-  -> ToolExecutor 写前触发 CheckpointHook，执行工具并 offload 长结果
-  -> after_tool hooks 投影 scratchpad
+  -> ToolExecutor 触发 pre_tool hooks，执行工具
+  -> after_tool pipeline 投影 scratchpad 并 offload 长结果
   -> RunCoordinator 保存 active session messages
 ```
 
