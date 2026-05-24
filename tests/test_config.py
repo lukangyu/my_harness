@@ -82,6 +82,7 @@ deny = []
     assert config.context.restore_last_session is False
     assert config.context.show_cache_stats is True
     assert config.context.compact_threshold_ratio == 0.8
+    assert config.context.compact_tail_ratio == 0.2
     assert config.context.protected_recent_turns == 4
     assert config.context.protected_tool_results == 6
     assert config.context.handoff_max_chars == 6000
@@ -126,6 +127,7 @@ include_recent_commits = false
 restore_last_session = true
 show_cache_stats = false
 compact_threshold_ratio = 0.7
+compact_tail_ratio = 0.3
 protected_recent_turns = 2
 protected_tool_results = 3
 handoff_max_chars = 1200
@@ -151,6 +153,7 @@ file_summaries_max_chars = 1500
     assert config.context.restore_last_session is True
     assert config.context.show_cache_stats is False
     assert config.context.compact_threshold_ratio == 0.7
+    assert config.context.compact_tail_ratio == 0.3
     assert config.context.protected_recent_turns == 2
     assert config.context.protected_tool_results == 3
     assert config.context.handoff_max_chars == 1200

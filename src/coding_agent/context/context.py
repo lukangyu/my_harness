@@ -47,6 +47,7 @@ class WorkspaceContextOptions:
     include_recent_commits: bool = True
     max_input_tokens: int = 24000
     compact_threshold_ratio: float = 0.8
+    compact_tail_ratio: float = 0.2
     protected_recent_turns: int = 4
     protected_tool_results: int = 6
     handoff_max_chars: int = 6000
@@ -229,11 +230,16 @@ class Context:
         }
         return estimate_tokens(json.dumps(payload, ensure_ascii=False, sort_keys=True))
 
-    def slice_old_history(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    def slice_old_history(
+        self,
+        *,
+        tail_token_budget: int | None = None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         partitions = partition_messages(
             [frame.payload for frame in self._active_frames if frame.kind == "history"],
             protected_recent_turns=self.options.protected_recent_turns,
             protected_tool_results=self.options.protected_tool_results,
+            tail_token_budget=tail_token_budget,
         )
         return partitions.compactable, partitions.reserved
 
@@ -400,16 +406,19 @@ def partition_messages(
     *,
     protected_recent_turns: int,
     protected_tool_results: int,
+    tail_token_budget: int | None = None,
 ) -> MessagePartitions:
     if protected_recent_turns <= 0:
         return MessagePartitions(compactable=deepcopy(messages), reserved=[])
     protected: list[dict[str, Any]] = []
     protected_tool_count = 0
     user_turns = 0
+    protected_tokens = 0
     cutoff = len(messages)
     for message in reversed(messages):
         cutoff -= 1
         prepared = deepcopy(message)
+        protected_tokens += _message_tokens(prepared)
         if prepared.get("role") == "tool":
             protected_tool_count += 1
             if protected_tool_count > protected_tool_results:
@@ -419,10 +428,64 @@ def partition_messages(
         protected.append(prepared)
         if prepared.get("role") == "user":
             user_turns += 1
-            if user_turns >= protected_recent_turns:
+            if user_turns >= protected_recent_turns and (
+                tail_token_budget is None or protected_tokens >= tail_token_budget
+            ):
                 break
-    protected.reverse()
+    cutoff = _align_history_cutoff(messages, cutoff)
+    protected = []
+    protected_tool_count = 0
+    for message in messages[cutoff:]:
+        prepared = deepcopy(message)
+        if prepared.get("role") == "tool":
+            protected_tool_count += 1
+            if protected_tool_count > protected_tool_results:
+                prepared["content"] = "[旧 tool 输出已清理，关键结论见 handoff_memo 或 tool_index.jsonl]"
+        protected.append(prepared)
     return MessagePartitions(compactable=deepcopy(messages[:cutoff]), reserved=protected)
+
+
+def _message_tokens(message: dict[str, Any]) -> int:
+    return estimate_tokens(json.dumps(message, ensure_ascii=False, sort_keys=True))
+
+
+def _align_history_cutoff(messages: list[dict[str, Any]], cutoff: int) -> int:
+    if cutoff <= 0 or cutoff >= len(messages):
+        return cutoff
+    compact_tail = messages[cutoff - 1]
+    if compact_tail.get("role") == "tool":
+        parent_cutoff = _find_parent_assistant_cutoff(messages, cutoff - 1)
+        if parent_cutoff is not None:
+            return parent_cutoff
+    reserved_first = messages[cutoff]
+    if reserved_first.get("role") != "tool":
+        return cutoff
+    tool_call_id = reserved_first.get("tool_call_id")
+    parent_cutoff = _find_parent_assistant_cutoff(messages, cutoff, tool_call_id)
+    return parent_cutoff if parent_cutoff is not None else cutoff
+
+
+def _find_parent_assistant_cutoff(
+    messages: list[dict[str, Any]],
+    tool_index: int,
+    tool_call_id: Any | None = None,
+) -> int | None:
+    if tool_call_id is None:
+        tool_call_id = messages[tool_index].get("tool_call_id")
+    for index in range(tool_index - 1, -1, -1):
+        candidate = messages[index]
+        if candidate.get("role") == "assistant" and _assistant_calls_tool(candidate, tool_call_id):
+            return index
+        if candidate.get("role") == "user":
+            break
+    return None
+
+
+def _assistant_calls_tool(message: dict[str, Any], tool_call_id: Any) -> bool:
+    tool_calls = message.get("tool_calls")
+    if not isinstance(tool_calls, list):
+        return False
+    return any(isinstance(call, dict) and call.get("id") == tool_call_id for call in tool_calls)
 
 
 def clear_old_tool_results(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -446,7 +509,27 @@ def build_handoff_prompt(
 ) -> str:
     return (
         "你正在进行上下文检查点压缩。请为即将接手任务的下一个 LLM 实例生成一份清晰、精简、可执行的交接摘要。\n"
-        "必须包含当前目标、已完成、关键事实、用户偏好、剩余 TODO、下一步。\n\n"
+        "必须使用下面的 Markdown 结构，只输出摘要正文，不要输出额外解释：\n\n"
+        "## 目标\n"
+        "[用户正在完成什么]\n\n"
+        "## 约束与偏好\n"
+        "[用户偏好、代码风格、限制条件、必须遵守的架构边界]\n\n"
+        "## 进度\n"
+        "### 已完成\n"
+        "[已经完成的工作，包含具体文件、命令和结果]\n"
+        "### 进行中\n"
+        "[当前正在处理的事项]\n"
+        "### 阻塞项\n"
+        "[遇到的问题；没有则写 none]\n\n"
+        "## 关键决策\n"
+        "[重要技术决策以及原因]\n\n"
+        "## 相关文件\n"
+        "[读过、修改过或创建过的文件及简短说明]\n\n"
+        "## 下一步\n"
+        "[下一步应该做什么]\n\n"
+        "## 关键上下文\n"
+        "[错误信息、配置值、路径、测试结果等必须保留的细节]\n\n"
+        "如果 previous_handoff 中已有摘要，请更新它：保留仍然有效的信息，移除过时信息，并合并 old_messages 的新增进展。\n\n"
         "<source_refs>\n"
         f"{json.dumps(source_refs, ensure_ascii=False)}\n"
         "</source_refs>\n\n"

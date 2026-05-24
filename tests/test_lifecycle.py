@@ -125,6 +125,54 @@ def test_context_compaction_hook_leaves_large_tool_frames_to_execution_offload(t
     assert not list(store.tool_result_dir.glob("*.txt"))
 
 
+def test_context_compaction_hook_writes_structured_summary_to_handoff(tmp_path, monkeypatch):
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent.resolve()))
+    store = MemoryStore(tmp_path)
+    store.write_handoff("previous handoff")
+    summary = (
+        "## 目标\n继续任务\n\n"
+        "## 约束与偏好\n保持工具层纯净\n\n"
+        "## 进度\n### 已完成\n- 已归档旧消息\n\n"
+        "## 下一步\n- 继续实现"
+    )
+    compact_client = FakeClient([{"message": {"role": "assistant", "content": summary}}])
+    hook = ContextCompactionHook(memory_store=store, compact_client=compact_client)
+    client = FakeClient([{"message": {"role": "assistant", "content": "answer"}}])
+    agent = AgentLoop(
+        client,
+        make_tools(tmp_path),
+        max_steps=1,
+        cwd=tmp_path,
+        context_options=WorkspaceContextOptions(
+            include_project_docs=False,
+            include_file_tree=False,
+            include_git_status=False,
+            include_recent_commits=False,
+            max_input_tokens=80,
+            compact_threshold_ratio=0.1,
+            protected_recent_turns=1,
+        ),
+        lifecycle_hooks=[hook],
+    )
+    prior = [
+        {"role": "user", "content": "old " + "x" * 100},
+        {"role": "assistant", "content": "old answer"},
+        {"role": "user", "content": "new"},
+    ]
+
+    agent.run("inspect", prior_messages=prior)
+
+    compact_prompt = compact_client.calls[0]["messages"][1]["content"]
+    assert "## 目标" in compact_prompt
+    assert "## 关键决策" in compact_prompt
+    assert "previous handoff" in compact_prompt
+    assert store.read_handoff().strip() == summary
+    compacted_message = client.calls[0]["messages"][2]
+    assert compacted_message["role"] == "assistant"
+    assert compacted_message["content"].startswith("[CONTEXT COMPACTION]")
+    assert "## 目标\n继续任务" in compacted_message["content"]
+
+
 def test_lifecycle_hook_observes_llm_response(tmp_path):
     seen = []
 

@@ -51,6 +51,7 @@ class ContextConfig:
     restore_last_session: bool = False
     show_cache_stats: bool = True
     compact_threshold_ratio: float = 0.8
+    compact_tail_ratio: float = 0.2
     protected_recent_turns: int = 4
     protected_tool_results: int = 6
     handoff_max_chars: int = 6000
@@ -176,6 +177,12 @@ def load_config(project_root: Path) -> AppConfig:
             "compact_threshold_ratio",
             context_defaults.compact_threshold_ratio,
             "context.compact_threshold_ratio",
+        ),
+        compact_tail_ratio=_optional_float(
+            context_data,
+            "compact_tail_ratio",
+            context_defaults.compact_tail_ratio,
+            "context.compact_tail_ratio",
         ),
         protected_recent_turns=_optional_int(
             context_data,

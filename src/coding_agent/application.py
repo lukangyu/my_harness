@@ -10,7 +10,7 @@ from coding_agent.context.prompt_builder import create_default_prompt_builder
 from coding_agent.execution.policy import CommandPolicy
 from coding_agent.execution.sandbox import WorkspaceSandbox
 from coding_agent.execution.shell import ShellRunner
-from coding_agent.execution.tools import create_default_tools
+from coding_agent.execution.tools import create_default_tools, register_session_search_tool
 from coding_agent.hooks.compaction_hook import ContextCompactionHook
 from coding_agent.hooks.memory_hook import MemoryProjectionHook
 from coding_agent.llm import OpenAICompatibleClient
@@ -75,6 +75,15 @@ class Application:
         policy = CommandPolicy(allow=self.config.commands.allow, deny=self.config.commands.deny)
         shell = ShellRunner(policy=policy, cwd=sandbox.root, approval_callback=self.command_approval)
         tools = create_default_tools(sandbox, shell)
+        register_session_search_tool(
+            tools,
+            sandbox,
+            [
+                self.config.project_root / ".coding-agent" / "memory",
+                self.config.project_root / ".coding-agent" / "sessions",
+                self.config.project_root / ".coding-agent" / "runs",
+            ],
+        )
         client = OpenAICompatibleClient(
             base_url=self.config.model.base_url,
             api_key=self.config.model.api_key,
@@ -136,6 +145,7 @@ def _context_options(config: AppConfig) -> WorkspaceContextOptions:
         include_recent_commits=config.context.include_recent_commits,
         max_input_tokens=config.context.max_input_tokens,
         compact_threshold_ratio=config.context.compact_threshold_ratio,
+        compact_tail_ratio=config.context.compact_tail_ratio,
         protected_recent_turns=config.context.protected_recent_turns,
         protected_tool_results=config.context.protected_tool_results,
         handoff_max_chars=config.context.handoff_max_chars,

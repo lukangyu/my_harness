@@ -338,3 +338,42 @@ def test_context_slice_old_history_protects_recent_without_archiving(tmp_path, m
     assert old_messages == prior[:2]
     assert remaining_messages[0]["content"] == "new"
     assert "旧 tool 输出已清理" in remaining_messages[2]["content"]
+
+
+def test_context_slice_old_history_aligns_tool_result_with_parent_call(tmp_path, monkeypatch):
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent.resolve()))
+    context = Context(
+        cwd=tmp_path,
+        options=WorkspaceContextOptions(
+            include_project_docs=False,
+            include_file_tree=False,
+            protected_recent_turns=1,
+            protected_tool_results=10,
+        ),
+        task="task",
+    )
+    prior = [
+        {"role": "user", "content": "old"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "read_file", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call-1", "name": "read_file", "content": "result"},
+        {"role": "user", "content": "new"},
+    ]
+    for message in prior:
+        context.add_message(message)
+
+    old_messages, remaining_messages = context.slice_old_history()
+
+    assert old_messages == [{"role": "user", "content": "old"}]
+    assert remaining_messages[0]["role"] == "assistant"
+    assert remaining_messages[1]["role"] == "tool"
+    assert remaining_messages[2] == {"role": "user", "content": "new"}

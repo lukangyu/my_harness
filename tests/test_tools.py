@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from coding_agent.execution.policy import CommandPolicy
 from coding_agent.execution.sandbox import WorkspaceSandbox
 from coding_agent.execution.shell import ShellRunner
-from coding_agent.execution.tools import ToolRegistry, create_default_tools
+from coding_agent.execution.tools import ToolRegistry, create_default_tools, register_session_search_tool
 
 
 def make_tools(tmp_path, allow=None):
@@ -228,6 +228,135 @@ def test_search_text_falls_back_when_rg_is_unavailable(tmp_path, monkeypatch):
     assert result["ok"] is True
     assert result["matches"] == [{"path": "notes.txt", "line": 1, "text": "needle"}]
     assert result["metadata"]["engine"] == "python"
+
+
+def test_session_search_registers_schema_without_default_tool_dependency(tmp_path):
+    tools = make_tools(tmp_path)
+    register_session_search_tool(
+        tools,
+        WorkspaceSandbox(tmp_path),
+        [tmp_path / ".coding-agent" / "memory"],
+    )
+
+    schema = next(schema for schema in tools.schemas() if schema["function"]["name"] == "session_search")
+
+    properties = schema["function"]["parameters"]["properties"]
+    assert schema["function"]["description"] == "Search archived agent memory, sessions, and run artifacts."
+    assert set(properties) == {"query", "case_sensitive", "regex", "glob", "max_matches", "sources"}
+    assert schema["function"]["parameters"]["required"] == ["query"]
+
+
+def test_session_search_finds_matches_in_memory_with_python_fallback(tmp_path, monkeypatch):
+    tools = make_tools(tmp_path)
+    memory_root = tmp_path / ".coding-agent" / "memory"
+    session_root = tmp_path / ".coding-agent" / "sessions"
+    memory_root.mkdir(parents=True)
+    session_root.mkdir(parents=True)
+    (memory_root / "handoff.md").write_text("Decision: use ContextCompressor\n", encoding="utf-8")
+    (session_root / "session.json").write_text('{"note":"ContextCompressor resumed"}\n', encoding="utf-8")
+    register_session_search_tool(tools, WorkspaceSandbox(tmp_path), [memory_root, session_root])
+    monkeypatch.setattr("coding_agent.execution.tools.shutil.which", lambda name: None)
+
+    result = tools.call("session_search", {"query": "contextcompressor", "case_sensitive": False})
+
+    assert result["ok"] is True
+    assert result["matches"] == [
+        {
+            "source": "memory",
+            "path": ".coding-agent/memory/handoff.md",
+            "line": 1,
+            "text": "Decision: use ContextCompressor",
+        },
+        {
+            "source": "sessions",
+            "path": ".coding-agent/sessions/session.json",
+            "line": 1,
+            "text": '{"note":"ContextCompressor resumed"}',
+        },
+    ]
+    assert result["metadata"]["engine"] == "python"
+    assert result["metadata"]["searched_roots"] == [
+        ".coding-agent/memory",
+        ".coding-agent/sessions",
+    ]
+
+
+def test_session_search_uses_rg_when_available(tmp_path, monkeypatch):
+    tools = make_tools(tmp_path)
+    run_root = tmp_path / ".coding-agent" / "runs"
+    run_root.mkdir(parents=True)
+    register_session_search_tool(tools, WorkspaceSandbox(tmp_path), [run_root])
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return SimpleNamespace(returncode=0, stdout="20260524/dialog/log.jsonl:7:critical decision\n")
+
+    monkeypatch.setattr("coding_agent.execution.tools.shutil.which", lambda name: "rg.exe" if name == "rg" else None)
+    monkeypatch.setattr("coding_agent.execution.tools.subprocess.run", fake_run)
+
+    result = tools.call("session_search", {"query": "critical", "regex": False, "max_matches": 3})
+
+    assert result["ok"] is True
+    assert result["matches"] == [
+        {
+            "source": "dialog",
+            "path": ".coding-agent/runs/20260524/dialog/log.jsonl",
+            "line": 7,
+            "text": "critical decision",
+        }
+    ]
+    assert result["metadata"]["engine"] == "rg"
+    assert result["metadata"]["truncated"] is False
+    assert "--fixed-strings" in calls[0][0]
+    assert calls[0][1]["cwd"] == run_root
+
+
+def test_session_search_filters_sources_and_limits_results(tmp_path, monkeypatch):
+    tools = make_tools(tmp_path)
+    memory_root = tmp_path / ".coding-agent" / "memory"
+    runs_root = tmp_path / ".coding-agent" / "runs"
+    memory_root.mkdir(parents=True)
+    runs_root.mkdir(parents=True)
+    (memory_root / "handoff.md").write_text("needle one\nneedle two\n", encoding="utf-8")
+    (runs_root / "trace.jsonl").write_text("needle run\n", encoding="utf-8")
+    register_session_search_tool(tools, WorkspaceSandbox(tmp_path), [memory_root, runs_root])
+    monkeypatch.setattr("coding_agent.execution.tools.shutil.which", lambda name: None)
+
+    result = tools.call("session_search", {"query": "needle", "sources": ["memory"], "max_matches": 1})
+
+    assert result["ok"] is True
+    assert result["matches"] == [
+        {
+            "source": "memory",
+            "path": ".coding-agent/memory/handoff.md",
+            "line": 1,
+            "text": "needle one",
+        }
+    ]
+    assert result["metadata"]["truncated"] is True
+    assert result["metadata"]["searched_roots"] == [".coding-agent/memory"]
+
+
+def test_session_search_sees_memory_root_created_after_registration(tmp_path, monkeypatch):
+    tools = make_tools(tmp_path)
+    memory_root = tmp_path / ".coding-agent" / "memory"
+    register_session_search_tool(tools, WorkspaceSandbox(tmp_path), [memory_root])
+    memory_root.mkdir(parents=True)
+    (memory_root / "handoff.md").write_text("late decision\n", encoding="utf-8")
+    monkeypatch.setattr("coding_agent.execution.tools.shutil.which", lambda name: None)
+
+    result = tools.call("session_search", {"query": "late"})
+
+    assert result["ok"] is True
+    assert result["matches"] == [
+        {
+            "source": "memory",
+            "path": ".coding-agent/memory/handoff.md",
+            "line": 1,
+            "text": "late decision",
+        }
+    ]
 
 
 def test_unknown_tool_returns_error(tmp_path):

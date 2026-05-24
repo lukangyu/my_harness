@@ -41,10 +41,14 @@ def test_application_imports_and_run_task_constructs_runtime(tmp_path, monkeypat
     class FakeAgentLoop:
         def __init__(self, **kwargs):
             self.on_progress = kwargs["on_progress"]
+            self.tools = kwargs["tools"]
 
         def run(self, task, *, prior_messages, mode):
+            tool_names = [schema["function"]["name"] for schema in self.tools.schemas()]
             self.on_progress({"type": "model_attempt", "attempts": 1, "step": 1})
-            progress_events.append({"task": task, "prior_messages": prior_messages, "mode": mode})
+            progress_events.append(
+                {"task": task, "prior_messages": prior_messages, "mode": mode, "tool_names": tool_names}
+            )
             return AgentResult(
                 final_answer="done",
                 messages=[],
@@ -71,7 +75,22 @@ def test_application_imports_and_run_task_constructs_runtime(tmp_path, monkeypat
     assert result.session_path.exists()
     assert result.run_dir is not None
     assert (result.run_dir / "task_state.json").exists()
-    assert progress_events == [{"task": "inspect", "prior_messages": [], "mode": "run"}]
+    assert progress_events == [
+        {
+            "task": "inspect",
+            "prior_messages": [],
+            "mode": "run",
+            "tool_names": [
+                "list_files",
+                "read_file",
+                "write_file",
+                "search_text",
+                "apply_patch",
+                "run_shell",
+                "session_search",
+            ],
+        }
+    ]
     assert shell_runners[0].approval_callback is approval
 
 

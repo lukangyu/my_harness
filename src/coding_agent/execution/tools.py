@@ -28,6 +28,8 @@ DEFAULT_IGNORED_DIRS = {
 DEFAULT_LIST_MAX_ENTRIES = 200
 DEFAULT_READ_MAX_CHARS = 50_000
 DEFAULT_SEARCH_MAX_MATCHES = 100
+DEFAULT_SESSION_SEARCH_MAX_MATCHES = 50
+SESSION_SEARCH_SOURCE_NAMES = {"memory", "sessions", "runs", "dialog", "tool_result"}
 
 
 @dataclass(frozen=True)
@@ -278,6 +280,203 @@ def create_default_tools(
     )
 
     return registry
+
+
+def register_session_search_tool(
+    registry: ToolRegistry,
+    sandbox: WorkspaceSandbox,
+    roots: list[Path],
+) -> None:
+    candidate_roots = [sandbox.resolve(root) for root in roots]
+
+    def session_search(arguments: dict[str, Any]) -> dict[str, Any]:
+        query = arguments["query"]
+        case_sensitive = bool(arguments.get("case_sensitive", False))
+        use_regex = bool(arguments.get("regex", False))
+        glob = arguments.get("glob")
+        max_matches = _positive_int(arguments.get("max_matches"), DEFAULT_SESSION_SEARCH_MAX_MATCHES)
+        sources = _session_search_sources(arguments.get("sources"))
+        selected_roots = [
+            root
+            for root in candidate_roots
+            if root.exists() and (sources is None or _session_source_for_path(sandbox.relative_path(root)) in sources)
+        ]
+        searched_roots = [sandbox.relative_path(root) for root in selected_roots]
+
+        rg_result = _session_search_with_rg(
+            sandbox,
+            selected_roots,
+            query,
+            case_sensitive=case_sensitive,
+            use_regex=use_regex,
+            glob=glob,
+            max_matches=max_matches,
+        )
+        if rg_result is not None:
+            rg_result["metadata"]["searched_roots"] = searched_roots
+            return rg_result
+
+        result = _session_search_with_python(
+            sandbox,
+            selected_roots,
+            query,
+            case_sensitive=case_sensitive,
+            use_regex=use_regex,
+            glob=glob,
+            max_matches=max_matches,
+        )
+        result["metadata"]["searched_roots"] = searched_roots
+        return result
+
+    registry.register(
+        "session_search",
+        "Search archived agent memory, sessions, and run artifacts.",
+        _parameters(
+            properties={
+                "query": {"type": "string"},
+                "case_sensitive": {"type": "boolean", "default": False},
+                "regex": {"type": "boolean", "default": False},
+                "glob": {"type": "string"},
+                "max_matches": {"type": "integer", "default": DEFAULT_SESSION_SEARCH_MAX_MATCHES},
+                "sources": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": sorted(SESSION_SEARCH_SOURCE_NAMES)},
+                },
+            },
+            required=["query"],
+        ),
+        session_search,
+    )
+
+
+def _session_search_with_python(
+    sandbox: WorkspaceSandbox,
+    roots: list[Path],
+    query: str,
+    *,
+    case_sensitive: bool,
+    use_regex: bool,
+    glob: Any,
+    max_matches: int,
+) -> dict[str, Any]:
+    matches: list[dict[str, Any]] = []
+    matcher = _compile_matcher(query, case_sensitive=case_sensitive, use_regex=use_regex)
+
+    for root in sorted(roots, key=sandbox.relative_path):
+        paths = _iter_memory_files(root) if root.is_dir() else [root]
+        for path in sorted(paths, key=sandbox.relative_path):
+            relative = sandbox.relative_path(path)
+            if isinstance(glob, str) and glob and not fnmatch(Path(relative).name, glob) and not fnmatch(relative, glob):
+                continue
+            try:
+                lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError:
+                continue
+
+            for line_number, line in enumerate(lines, start=1):
+                if matcher(line):
+                    matches.append(
+                        {
+                            "source": _session_source_for_path(relative),
+                            "path": relative,
+                            "line": line_number,
+                            "text": line,
+                        }
+                    )
+                    if len(matches) >= max_matches:
+                        return {
+                            "ok": True,
+                            "matches": matches,
+                            "metadata": {
+                                "engine": "python",
+                                "returned_matches": len(matches),
+                                "truncated": True,
+                                "regex": use_regex,
+                                "case_sensitive": case_sensitive,
+                            },
+                        }
+
+    return {
+        "ok": True,
+        "matches": matches,
+        "metadata": {
+            "engine": "python",
+            "returned_matches": len(matches),
+            "truncated": False,
+            "regex": use_regex,
+            "case_sensitive": case_sensitive,
+        },
+    }
+
+
+def _session_search_with_rg(
+    sandbox: WorkspaceSandbox,
+    roots: list[Path],
+    query: str,
+    *,
+    case_sensitive: bool,
+    use_regex: bool,
+    glob: Any,
+    max_matches: int,
+) -> dict[str, Any] | None:
+    rg = shutil.which("rg")
+    if rg is None:
+        return None
+
+    matches: list[dict[str, Any]] = []
+    for root in sorted(roots, key=sandbox.relative_path):
+        command = [rg, "--line-number", "--no-heading", "--color=never"]
+        if not case_sensitive:
+            command.append("--ignore-case")
+        if not use_regex:
+            command.append("--fixed-strings")
+        if isinstance(glob, str) and glob:
+            command.extend(["--glob", glob])
+        command.extend(["--", query, "."])
+
+        try:
+            result = subprocess.run(command, cwd=root, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+
+        if result.returncode not in (0, 1):
+            return None
+
+        for line in result.stdout.splitlines():
+            parts = line.split(":", 2)
+            if len(parts) != 3:
+                continue
+            match_path, line_number_text, text = parts
+            try:
+                line_number = int(line_number_text)
+            except ValueError:
+                continue
+            absolute_match_path = (root / match_path).resolve()
+            relative = sandbox.relative_path(absolute_match_path)
+            matches.append(
+                {
+                    "source": _session_source_for_path(relative),
+                    "path": relative,
+                    "line": line_number,
+                    "text": text,
+                }
+            )
+
+    matches.sort(key=lambda match: (match["path"], match["line"], match["text"]))
+    truncated = len(matches) > max_matches
+    returned_matches = matches[:max_matches]
+
+    return {
+        "ok": True,
+        "matches": returned_matches,
+        "metadata": {
+            "engine": "rg",
+            "returned_matches": len(returned_matches),
+            "truncated": truncated,
+            "regex": use_regex,
+            "case_sensitive": case_sensitive,
+        },
+    }
 
 
 def _search_text_with_python(
@@ -571,6 +770,47 @@ def _iter_files(root: Path, base: Path, *, max_depth: int | None) -> list[Path]:
                 continue
             files.extend(_iter_files(child, base, max_depth=max_depth))
     return files
+
+
+def _iter_memory_files(root: Path) -> list[Path]:
+    files: list[Path] = []
+    for child in root.iterdir():
+        if child.name in {"__pycache__"} or child.name.startswith(".pytest"):
+            continue
+        if child.is_file():
+            files.append(child)
+            continue
+        if child.is_dir():
+            files.extend(_iter_memory_files(child))
+    return files
+
+
+def _session_search_sources(value: Any) -> set[str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise ValueError("sources must be a list of source names")
+    sources = set(value)
+    unknown = sources - SESSION_SEARCH_SOURCE_NAMES
+    if unknown:
+        raise ValueError(f"unknown session_search sources: {', '.join(sorted(unknown))}")
+    return sources
+
+
+def _session_source_for_path(relative: str) -> str:
+    parts = Path(relative).parts
+    if "dialog" in parts:
+        return "dialog"
+    if "tool_result" in parts:
+        return "tool_result"
+    if len(parts) >= 2 and parts[0] == ".coding-agent":
+        if parts[1] == "memory":
+            return "memory"
+        if parts[1] == "sessions":
+            return "sessions"
+        if parts[1] == "runs":
+            return "runs"
+    return "memory"
 
 
 def _is_ignored(relative: Path) -> bool:
