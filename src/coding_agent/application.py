@@ -22,6 +22,7 @@ from coding_agent.memory.store import MemoryStore
 from coding_agent.orchestrator.agent_loop import AgentLoop
 from coding_agent.orchestrator.coordinator import RunCoordinator
 from coding_agent.orchestrator.lifecycle import AgentLifecycleRegistry
+from coding_agent.orchestrator.subagent import SubagentManager, register_subagent_tools
 from coding_agent.run_result import RunTaskResult
 from coding_agent.runtime_events import RuntimeEvent
 from coding_agent.session import ConversationStore, SessionRef, SessionRuntime
@@ -100,6 +101,7 @@ class Application:
             ],
             current_session_root=session_ref.session_dir,
         )
+        context_options = _context_options(self.config)
         client = OpenAICompatibleClient(
             base_url=self.config.model.base_url,
             api_key=self.config.model.api_key,
@@ -109,6 +111,25 @@ class Application:
             debug_dir=run_artifact.debug_dir,
             telemetry=telemetry,
         )
+        subagent_manager = SubagentManager(
+            cwd=sandbox.root,
+            tools=tools,
+            client_factory=lambda debug_dir: OpenAICompatibleClient(
+                base_url=self.config.model.base_url,
+                api_key=self.config.model.api_key,
+                model=self.config.model.model,
+                stream=self.config.agent.stream,
+                debug_dir=debug_dir,
+                telemetry=telemetry,
+            ),
+            context_options=context_options,
+            memory_store=memory_store,
+            telemetry=telemetry,
+            on_runtime_event=self.on_runtime_event,
+            artifact_root=run_artifact.agent_context_dir / "subagents",
+            max_steps=self.config.agent.max_steps,
+        )
+        register_subagent_tools(tools, subagent_manager)
         coordinator = RunCoordinator(
             run_store=run_store,
             run_artifact=run_artifact,
@@ -143,14 +164,14 @@ class Application:
             tools=tools,
             max_steps=self.config.agent.max_steps,
             cwd=sandbox.root,
-            context_options=_context_options(self.config),
+            context_options=context_options,
             recent_message_tokens=self.config.context.recent_message_tokens,
             on_tool_call=self.on_tool_call,
             telemetry=telemetry,
             memory_store=memory_store,
             context_assembler=ContextAssembler(
                 cwd=sandbox.root,
-                options=_context_options(self.config),
+                options=context_options,
                 memory_store=memory_store,
             ),
             on_progress=coordinator.record_progress,

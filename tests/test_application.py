@@ -88,6 +88,9 @@ def test_application_imports_and_run_task_constructs_runtime(tmp_path, monkeypat
                 "apply_patch",
                 "run_shell",
                 "session_search",
+                "start_subagent",
+                "wait_subagent",
+                "cancel_subagent",
             ],
         }
     ]

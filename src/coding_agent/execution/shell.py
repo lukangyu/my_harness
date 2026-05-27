@@ -33,6 +33,7 @@ class ShellRunner:
 
     def run(self, command: str) -> ShellResult:
         policy_result = self.policy.evaluate(command)
+        requires_shell = policy_result.reason == "Command contains shell control operator"
         if policy_result.decision is not CommandDecision.ALLOW:
             if not _can_request_approval(policy_result.reason):
                 return ShellResult(
@@ -60,15 +61,25 @@ class ShellRunner:
                 )
 
         try:
-            argv = _command_to_argv(command, self.cwd)
-            completed = subprocess.run(
-                argv,
-                cwd=self.cwd,
-                shell=False,
-                text=True,
-                capture_output=True,
-                timeout=self.timeout_seconds,
-            )
+            if requires_shell:
+                completed = subprocess.run(
+                    command,
+                    cwd=self.cwd,
+                    shell=True,
+                    text=True,
+                    capture_output=True,
+                    timeout=self.timeout_seconds,
+                )
+            else:
+                argv = _command_to_argv(command, self.cwd)
+                completed = subprocess.run(
+                    argv,
+                    cwd=self.cwd,
+                    shell=False,
+                    text=True,
+                    capture_output=True,
+                    timeout=self.timeout_seconds,
+                )
         except ValueError as exc:
             return ShellResult(
                 command=command,
@@ -139,4 +150,7 @@ def _strip_outer_quotes(value: str) -> str:
 
 
 def _can_request_approval(reason: str) -> bool:
-    return reason == "Command not in allow list"
+    return reason in {
+        "Command not in allow list",
+        "Command contains shell control operator",
+    }

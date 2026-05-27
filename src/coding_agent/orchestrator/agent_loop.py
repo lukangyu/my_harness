@@ -1,20 +1,22 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
+import json
+import re
 from typing import Any, Callable, Protocol
 
 from coding_agent.context.assembler import ContextAssembler
 from coding_agent.context.context import UsageStats, WorkspaceContextOptions
 from coding_agent.context.prompt_builder import PromptBuilder, create_default_prompt_builder
-from coding_agent.context.virtual_tools import internal_tool_schemas
 from coding_agent.execution.executor import ToolExecutor
 from coding_agent.execution.tools import ToolRegistry
 from coding_agent.memory.store import MemoryStore
 from coding_agent.orchestrator.lifecycle import AgentLifecycleBus, AgentLifecycleRegistry, AgentTurnContext
 from coding_agent.runtime_events import RuntimeEvent
-from coding_agent.session import SessionRuntime
+from coding_agent.session import SessionRuntime, _GENERATED_PROMPT_MARKERS
 from coding_agent.telemetry.logger import TelemetryLogger
 
 
@@ -34,6 +36,19 @@ class AgentResult:
     tool_steps: int = 0
     last_tool: str | None = None
     stop_reason: str = "final_answer"
+
+
+PARALLEL_SAFE_TOOLS = {
+    "list_files",
+    "read_file",
+    "search_text",
+    "session_search",
+    "run_shell",
+    "start_subagent",
+    "wait_subagent",
+    "cancel_subagent",
+}
+MAX_PARALLEL_TOOLS = 4
 
 
 class AgentLoop:
@@ -90,7 +105,6 @@ class AgentLoop:
     ) -> AgentResult:
         self._event("agent.run.start", "AgentLoop 开始执行任务", "run", {"mode": mode, "task_length": len(task)})
         tool_schemas = self.tools.schemas()
-        request_tool_schemas = [*tool_schemas, *internal_tool_schemas()]
         with self._span("构建上下文", "context", {"tool_count": len(tool_schemas)}):
             context = self.context_assembler.build(
                 task=task,
@@ -120,8 +134,8 @@ class AgentLoop:
                 },
             )
         )
-        conversation_messages = context.raw_messages()
-        conversation_messages.append({"role": "user", "content": context.task})
+        conversation_messages = [_sanitize_conversation_message(message) for message in context.raw_messages()]
+        conversation_messages.append(_sanitize_conversation_message({"role": "user", "content": context.task}))
         current_turn_tail: list[dict[str, Any]] = []
         messages: list[dict[str, Any]] = []
         usage: UsageStats | None = None
@@ -152,7 +166,7 @@ class AgentLoop:
                 {"step": step, "message_count": len(messages)},
             )
             with self._span("调用大模型", "llm", {"step": step, "message_count": len(messages)}):
-                response = self.client.chat(messages, request_tool_schemas)
+                response = self.client.chat(messages, tool_schemas)
             turn_ctx.llm_response = response
             self.lifecycle.after_llm(turn_ctx)
             attempts += 1
@@ -163,7 +177,7 @@ class AgentLoop:
             assistant_message = response["message"]
             messages.append(assistant_message)
             current_turn_tail.append(deepcopy(assistant_message))
-            conversation_messages.append(deepcopy(assistant_message))
+            conversation_messages.append(_sanitize_conversation_message(assistant_message))
 
             tool_calls = assistant_message.get("tool_calls") or []
             self._event(
@@ -190,9 +204,8 @@ class AgentLoop:
                     stop_reason="final_answer",
                 )
 
-            for tool_call in tool_calls:
-                with self._span("生成 tool message", "tool", {"step": step}):
-                    tool_message = self.tool_executor.execute(tool_call, turn_ctx)
+            tool_messages = self._execute_tool_calls(tool_calls, turn_ctx, step)
+            for tool_message in tool_messages:
                 tool_steps += 1
                 last_tool = tool_message.get("name")
                 self._progress(
@@ -205,7 +218,7 @@ class AgentLoop:
                 )
                 messages.append(tool_message)
                 current_turn_tail.append(deepcopy(tool_message))
-                conversation_messages.append(deepcopy(tool_message))
+                conversation_messages.append(_sanitize_conversation_message(tool_message))
             self.lifecycle.on_turn_end(turn_ctx)
 
         self._event("agent.max_steps", "AgentLoop 达到最大步数后停止", "run", {"max_steps": self.max_steps})
@@ -240,10 +253,91 @@ class AgentLoop:
         if self.on_runtime_event is not None:
             self.on_runtime_event(event)
 
+    def _execute_tool_calls(
+        self,
+        tool_calls: list[dict[str, Any]],
+        turn_ctx: AgentTurnContext,
+        step: int,
+    ) -> list[dict[str, Any]]:
+        if len(tool_calls) <= 1 or not all(_is_parallel_safe_tool(tool_call) for tool_call in tool_calls):
+            return [self._execute_tool_call(tool_call, turn_ctx, step) for tool_call in tool_calls]
+
+        max_workers = min(MAX_PARALLEL_TOOLS, len(tool_calls))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                executor.submit(self._execute_tool_call, tool_call, turn_ctx, step)
+                for tool_call in tool_calls
+            ]
+            return [future.result() for future in futures]
+
+    def _execute_tool_call(
+        self,
+        tool_call: dict[str, Any],
+        turn_ctx: AgentTurnContext,
+        step: int,
+    ) -> dict[str, Any]:
+        try:
+            with self._span("生成 tool message", "tool", {"step": step, "tool": _tool_name(tool_call)}):
+                return self.tool_executor.execute(tool_call, turn_ctx)
+        except Exception as exc:
+            name = _tool_name(tool_call)
+            return {
+                "role": "tool",
+                "tool_call_id": tool_call.get("id", ""),
+                "name": name,
+                "content": json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False),
+            }
+
     def _span(self, name: str, phase: str, metadata: dict[str, Any] | None = None) -> Any:
         if self.telemetry is None:
             return _NullSpan()
         return self.telemetry.span(name, function="AgentLoop.run", phase=phase, metadata=metadata)
+
+
+_GENERATED_PROMPT_BLOCK_PATTERNS = (
+    (
+        re.compile(r"<workspace_context\b[^>]*>.*?</workspace_context>", re.IGNORECASE | re.DOTALL),
+        "[generated workspace context omitted]",
+    ),
+    (
+        re.compile(r"<current_task\b[^>]*>.*?</current_task>", re.IGNORECASE | re.DOTALL),
+        "[generated current task omitted]",
+    ),
+    (
+        re.compile(r"<coding_agent_prefix\b[^>]*>.*?</coding_agent_prefix>", re.IGNORECASE | re.DOTALL),
+        "[generated coding-agent prefix omitted]",
+    ),
+)
+
+
+def _sanitize_conversation_message(message: dict[str, Any]) -> dict[str, Any]:
+    sanitized = deepcopy(message)
+    for field in ("content", "reasoning_content"):
+        value = sanitized.get(field)
+        if isinstance(value, str):
+            sanitized[field] = _sanitize_generated_prompt_text(value)
+    return sanitized
+
+
+def _sanitize_generated_prompt_text(value: str) -> str:
+    sanitized = value
+    for pattern, replacement in _GENERATED_PROMPT_BLOCK_PATTERNS:
+        sanitized = pattern.sub(replacement, sanitized)
+    for marker in _GENERATED_PROMPT_MARKERS:
+        sanitized = sanitized.replace(marker, marker.replace("<", "&lt;", 1))
+    return sanitized
+
+
+def _tool_name(tool_call: dict[str, Any]) -> str:
+    function = tool_call.get("function")
+    if not isinstance(function, dict):
+        return ""
+    name = function.get("name")
+    return name if isinstance(name, str) else ""
+
+
+def _is_parallel_safe_tool(tool_call: dict[str, Any]) -> bool:
+    return _tool_name(tool_call) in PARALLEL_SAFE_TOOLS
 
 
 class _NullSpan:

@@ -58,6 +58,27 @@ def test_unlisted_command_does_not_run_when_human_denies(tmp_path):
     assert not marker.exists()
 
 
+def test_shell_control_command_runs_when_human_approves(tmp_path):
+    approvals = []
+    runner = ShellRunner(
+        CommandPolicy(allow=["printf"], deny=[]),
+        cwd=tmp_path,
+        approval_callback=lambda command, reason: approvals.append({"command": command, "reason": reason}) or True,
+    )
+
+    result = runner.run("printf hello | wc -c")
+
+    assert result.allowed is True
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "5"
+    assert approvals == [
+        {
+            "command": "printf hello | wc -c",
+            "reason": "Command contains shell control operator",
+        }
+    ]
+
+
 def test_denied_command_does_not_ask_for_human_approval(tmp_path):
     approvals = []
     runner = ShellRunner(

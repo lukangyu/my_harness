@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Iterator
 import json
 import os
+import threading
 import time
 import uuid
 
@@ -31,6 +32,7 @@ class TelemetryLogger:
         self.logs_dir = Path(logs_dir)
         self.workspace_root = Path(workspace_root).resolve() if workspace_root is not None else None
         self.run_id = run_id or uuid.uuid4().hex
+        self._write_lock = threading.Lock()
 
     def event(
         self,
@@ -116,8 +118,10 @@ class TelemetryLogger:
     def _append_jsonl(self, filename: str, record: dict[str, Any]) -> None:
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         path = self.logs_dir / filename
-        with path.open("a", encoding="utf-8") as file:
-            file.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+        line = json.dumps(record, ensure_ascii=False, default=str) + "\n"
+        with self._write_lock:
+            with path.open("a", encoding="utf-8") as file:
+                file.write(line)
 
 
 def build_workspace_snapshot(root: Path, *, max_entries: int = 200) -> dict[str, Any]:

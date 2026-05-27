@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import json
+import threading
 from typing import Any, Callable
 
-from coding_agent.context.virtual_tools import handle_internal_tool, is_internal_tool
+from coding_agent.execution.tools import ToolRegistry
 from coding_agent.orchestrator.lifecycle import AgentLifecycleBus, AgentTurnContext, ToolVeto
 from coding_agent.runtime_events import RuntimeEvent
 from coding_agent.telemetry.logger import TelemetryLogger
-from coding_agent.execution.tools import ToolRegistry
 
 
 class ToolExecutor:
@@ -19,12 +19,14 @@ class ToolExecutor:
         on_tool_call: Callable[[dict[str, Any]], None] | None = None,
         on_runtime_event: Callable[[RuntimeEvent], None] | None = None,
         telemetry: TelemetryLogger | None = None,
+        lifecycle_lock: threading.Lock | None = None,
     ) -> None:
         self.tools = tools
         self.lifecycle = lifecycle or AgentLifecycleBus()
         self.on_tool_call = on_tool_call
         self.on_runtime_event = on_runtime_event
         self.telemetry = telemetry
+        self.lifecycle_lock = lifecycle_lock or threading.Lock()
 
     def execute(self, tool_call: dict[str, Any], ctx: AgentTurnContext) -> dict[str, Any]:
         if self.on_tool_call is not None:
@@ -44,16 +46,15 @@ class ToolExecutor:
             if not isinstance(parsed_arguments, dict):
                 raise ValueError("tool arguments must be a JSON object")
             arguments = parsed_arguments
-            if is_internal_tool(name):
-                result = handle_internal_tool(name, arguments, ctx)
-            else:
+            with self.lifecycle_lock:
                 self.lifecycle.pre_tool(ctx, name, arguments)
-                result = self.tools.call(name, arguments)
+            result = self.tools.call(name, arguments)
         except ToolVeto as veto:
             result = veto.result
         except (json.JSONDecodeError, ValueError) as exc:
             result = {"ok": False, "error": f"Invalid JSON arguments: {exc}"}
-        result = self.lifecycle.after_tool(ctx, name, arguments, result)
+        with self.lifecycle_lock:
+            result = self.lifecycle.after_tool(ctx, name, arguments, result)
         self._runtime_event(
             RuntimeEvent(
                 type="tool.result",

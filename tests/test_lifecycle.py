@@ -425,7 +425,7 @@ def test_memory_search_hook_injects_synthetic_pair_after_current_user(tmp_path, 
     ]
 
 
-def test_internal_virtual_tool_schemas_are_sent_but_not_user_registered(tmp_path):
+def test_virtual_protocol_tools_are_not_sent_as_request_schemas(tmp_path):
     client = FakeClient([{"message": {"role": "assistant", "content": "answer"}}])
     tools = make_tools(tmp_path)
     agent = AgentLoop(
@@ -448,8 +448,8 @@ def test_internal_virtual_tool_schemas_are_sent_but_not_user_registered(tmp_path
         for schema in tools.schemas()
         if isinstance(schema.get("function"), dict)
     }
-    assert "sync_session_context" in request_tool_names
-    assert "auto_memory_search" in request_tool_names
+    assert "sync_session_context" not in request_tool_names
+    assert "auto_memory_search" not in request_tool_names
     assert "sync_session_context" not in registered_tool_names
     assert "auto_memory_search" not in registered_tool_names
 

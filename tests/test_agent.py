@@ -1,5 +1,6 @@
 import json
 import os
+import time
 from pathlib import Path
 
 import httpx
@@ -8,7 +9,7 @@ from coding_agent.context.context import UsageStats, WorkspaceContextOptions
 from coding_agent.execution.policy import CommandPolicy
 from coding_agent.execution.sandbox import WorkspaceSandbox
 from coding_agent.execution.shell import ShellRunner
-from coding_agent.execution.tools import create_default_tools
+from coding_agent.execution.tools import ToolRegistry, create_default_tools
 from coding_agent.orchestrator.agent_loop import AgentLoop
 from coding_agent.runtime_events import RuntimeEvent
 from coding_agent.llm import LLMError, OpenAICompatibleClient
@@ -120,6 +121,154 @@ def test_agent_runs_tool_then_returns_final_answer(tmp_path):
         },
         {"role": "assistant", "content": "done"},
     ]
+
+
+def test_agent_treats_model_requested_virtual_tool_as_unknown(tmp_path):
+    client = FakeClient(
+        [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [tool_call("sync_session_context", "{}")],
+                }
+            },
+            {"message": {"role": "assistant", "content": "done"}},
+        ]
+    )
+    agent = AgentLoop(client, make_tools(tmp_path), max_steps=2, cwd=tmp_path)
+
+    agent.run("inspect")
+
+    tool_message = client.calls[1]["messages"][-1]
+    assert tool_message["role"] == "tool"
+    assert tool_message["name"] == "sync_session_context"
+    assert json.loads(tool_message["content"]) == {
+        "ok": False,
+        "error": "Unknown tool: sync_session_context",
+    }
+
+
+def test_agent_executes_parallel_safe_tool_calls_concurrently_and_preserves_order(tmp_path):
+    registry = ToolRegistry()
+    completions = []
+
+    def slow_read(arguments):
+        time.sleep(0.2)
+        completions.append("read_file")
+        return {"ok": True, "path": "slow.txt", "content": "slow"}
+
+    def fast_search(arguments):
+        completions.append("search_text")
+        return {"ok": True, "matches": []}
+
+    registry.register("read_file", "Read", {"type": "object", "properties": {}}, slow_read)
+    registry.register("search_text", "Search", {"type": "object", "properties": {}}, fast_search)
+    client = FakeClient(
+        [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        tool_call("read_file", "{}"),
+                        tool_call("search_text", "{}", call_id="call_2"),
+                    ],
+                }
+            },
+            {"message": {"role": "assistant", "content": "done"}},
+        ]
+    )
+    agent = AgentLoop(client, registry, max_steps=2, cwd=tmp_path)
+
+    agent.run("inspect")
+
+    tool_messages = [
+        message
+        for message in client.calls[1]["messages"]
+        if message.get("role") == "tool" and message.get("tool_call_id") in {"call_1", "call_2"}
+    ]
+    assert completions == ["search_text", "read_file"]
+    assert [message["name"] for message in tool_messages] == ["read_file", "search_text"]
+    assert [message["tool_call_id"] for message in tool_messages] == ["call_1", "call_2"]
+
+
+def test_agent_runs_mixed_write_batch_serially(tmp_path):
+    registry = ToolRegistry()
+    events = []
+
+    def write_file(arguments):
+        events.append("write_start")
+        time.sleep(0.05)
+        events.append("write_end")
+        return {"ok": True, "path": "notes.txt"}
+
+    def read_file(arguments):
+        events.append("read_start")
+        events.append("read_end")
+        return {"ok": True, "path": "notes.txt", "content": "hello"}
+
+    registry.register("write_file", "Write", {"type": "object", "properties": {}}, write_file)
+    registry.register("read_file", "Read", {"type": "object", "properties": {}}, read_file)
+    client = FakeClient(
+        [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        tool_call("write_file", "{}"),
+                        tool_call("read_file", "{}", call_id="call_2"),
+                    ],
+                }
+            },
+            {"message": {"role": "assistant", "content": "done"}},
+        ]
+    )
+    agent = AgentLoop(client, registry, max_steps=2, cwd=tmp_path)
+
+    agent.run("inspect")
+
+    assert events == ["write_start", "write_end", "read_start", "read_end"]
+
+
+def test_agent_waits_for_multiple_subagents_in_parallel(tmp_path):
+    registry = ToolRegistry()
+    completions = []
+
+    def wait_subagent(arguments):
+        if arguments["subagent_id"] == "a":
+            time.sleep(0.2)
+        completions.append(arguments["subagent_id"])
+        return {"ok": True, "subagent_id": arguments["subagent_id"], "status": "completed"}
+
+    registry.register("wait_subagent", "Wait", {"type": "object", "properties": {}}, wait_subagent)
+    client = FakeClient(
+        [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        tool_call("wait_subagent", json.dumps({"subagent_id": "a"})),
+                        tool_call("wait_subagent", json.dumps({"subagent_id": "b"}), call_id="call_2"),
+                    ],
+                }
+            },
+            {"message": {"role": "assistant", "content": "done"}},
+        ]
+    )
+    agent = AgentLoop(client, registry, max_steps=2, cwd=tmp_path)
+
+    agent.run("inspect")
+
+    tool_messages = [
+        message
+        for message in client.calls[1]["messages"]
+        if message.get("role") == "tool" and message.get("tool_call_id") in {"call_1", "call_2"}
+    ]
+    assert completions == ["b", "a"]
+    assert [json.loads(message["content"])["subagent_id"] for message in tool_messages] == ["a", "b"]
 
 
 def test_agent_preserves_previous_usage_when_final_response_has_no_usage(tmp_path):
@@ -385,6 +534,35 @@ def test_agent_result_conversation_messages_exclude_generated_prompt_blocks(tmp_
     assert "<current_task>" not in serialized
 
 
+def test_agent_sanitizes_model_echoed_prompt_markers_from_conversation_messages(tmp_path):
+    client = FakeClient(
+        [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "saw <workspace_context>secret</workspace_context> and <current_task>x</current_task>",
+                    "reasoning_content": "prefix <coding_agent_prefix version='1'>hidden",
+                }
+            }
+        ]
+    )
+    agent = AgentLoop(
+        client,
+        make_tools(tmp_path),
+        max_steps=1,
+        cwd=tmp_path,
+        context_options=context_options(),
+    )
+
+    result = agent.run("new task", mode="chat")
+
+    serialized = json.dumps(result.conversation_messages)
+    assert "<workspace_context>" not in serialized
+    assert "<current_task>" not in serialized
+    assert "<coding_agent_prefix" not in serialized
+    assert "generated workspace context omitted" in serialized
+
+
 def test_agent_reuses_sanitized_conversation_without_duplicating_prompt_blocks(tmp_path):
     first_client = FakeClient([{"message": {"role": "assistant", "content": "first"}}])
     first_agent = AgentLoop(
@@ -554,6 +732,22 @@ def test_llm_client_writes_debug_log_for_chat_request(monkeypatch, tmp_path):
     assert record["response"]["parsed"]["message"]["content"] == "hello"
     assert "secret" not in logs[0].read_text(encoding="utf-8")
     assert "Authorization" not in logs[0].read_text(encoding="utf-8")
+
+
+def test_llm_client_reports_empty_non_streaming_response(monkeypatch):
+    def fake_post(url, *, headers, json, timeout):
+        return httpx.Response(200, request=httpx.Request("POST", url), content=b"")
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    client = OpenAICompatibleClient("https://example.test/v1/", "secret", "model-a")
+
+    try:
+        client.chat([{"role": "user", "content": "hi"}], [])
+    except LLMError as exc:
+        assert "non-streaming model response" in str(exc)
+        assert "empty" in str(exc)
+    else:
+        raise AssertionError("expected LLMError")
 
 
 def test_llm_client_streams_openai_compatible_chat_request(monkeypatch):

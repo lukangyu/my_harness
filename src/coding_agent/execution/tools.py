@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from fnmatch import fnmatch
 from pathlib import Path
@@ -75,6 +75,14 @@ class ToolRegistry:
             return tool.func(arguments)
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
+
+    def subset(self, names: Iterable[str]) -> "ToolRegistry":
+        registry = ToolRegistry()
+        for name in names:
+            tool = self._tools.get(name)
+            if tool is not None:
+                registry._tools[name] = tool
+        return registry
 
 
 def create_default_tools(

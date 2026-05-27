@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from json import JSONDecodeError
 
 from coding_agent.context.context import UsageStats
 from coding_agent.telemetry.logger import TelemetryLogger
@@ -76,7 +77,12 @@ class OpenAICompatibleClient:
         except httpx.HTTPError as exc:
             raise LLMError(str(exc)) from exc
 
-        data = response.json()
+        try:
+            data = response.json()
+        except JSONDecodeError as exc:
+            body = response.text.strip()
+            detail = f" Response body: {body[:500]}" if body else " Response body was empty."
+            raise LLMError(f"Failed to parse non-streaming model response as JSON.{detail}") from exc
         result = {
             "message": data["choices"][0]["message"],
             "usage": UsageStats.from_response_usage(data.get("usage")),
